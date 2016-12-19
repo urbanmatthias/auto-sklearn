@@ -332,6 +332,9 @@ class SimpleClassificationPipelineTest(unittest.TestCase):
                 elif 'The condensed distance matrix must contain only finite ' \
                      'values.' in e.args[0]:
                     continue
+                elif 'which is larger than the original space with n_features='\
+                    in e.args[0]:
+                    continue
                 else:
                     print(config)
                     print(traceback.format_exc())
@@ -372,12 +375,12 @@ class SimpleClassificationPipelineTest(unittest.TestCase):
         self.assertEqual(len(cs.get_hyperparameter(
             'rescaling:__choice__').choices), 6)
         self.assertEqual(len(cs.get_hyperparameter(
-            'classifier:__choice__').choices), 16)
+            'classifier:__choice__').choices), 18)
         self.assertEqual(len(cs.get_hyperparameter(
-            'preprocessor:__choice__').choices), 13)
+            'preprocessor:__choice__').choices), 14)
 
         hyperparameters = cs.get_hyperparameters()
-        self.assertEqual(172, len(hyperparameters))
+        self.assertEqual(261, len(hyperparameters))
 
         #for hp in sorted([str(h) for h in hyperparameters]):
         #    print hp
