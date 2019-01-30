@@ -1,0 +1,13 @@
+#!/bin/bash
+
+# BASH Shell
+#$ -S /bin/bash 
+# Output files (stdout and stderr)
+#$ -o /home/urbanm/autonet1.stdout -e /home/urbanm/autonet1.stderr 
+# Execute  the  job  from  the  current  working  directory 
+#$ -cwd
+# send no mail for events (e.g., start or end of job)
+#$ -m n
+
+source activate autonet
+python3 tania_test.py
