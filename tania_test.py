@@ -60,7 +60,7 @@ def get_spawn_classifier(X_train, y_train):
         function, which is called several times in the main block is a new
         process which runs one instance of auto-sklearn.
         """
-        os.environ['THEANO_FLAGS'] = '.theano_%s' % seed
+        os.environ['THEANO_FLAGS'] = 'base_compiledir=.theano_%s' % seed
         import theano
         # Use the initial configurations from meta-learning only in one out of
         # the four processes spawned. This prevents auto-sklearn from evaluating
