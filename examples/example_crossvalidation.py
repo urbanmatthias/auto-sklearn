@@ -33,6 +33,7 @@ def main():
         delete_tmp_folder_after_terminate=False,
         resampling_strategy='cv',
         resampling_strategy_arguments={'folds': 5},
+        include_estimators=['DeepFeedNet']
     )
 
     # fit() changes the data in place, but refit needs the original data. We

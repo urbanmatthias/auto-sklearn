@@ -1,0 +1,2606 @@
+From 831d5bef8c8e47a66852b4d9e6343bbae3ba0a80 Mon Sep 17 00:00:00 2001
+From: hmendozap <heist.mendoza@gmail.com>
+Date: Mon, 19 Dec 2016 20:26:54 +0100
+Subject: [PATCH] Added Deep Feed Forward Neural Network componet, regression
+ and classification
+
+TEST integrate Auto-Net into unit test suite
+
+CI add additional unit tests for new components
+
+fix bug that occured with the latest theano version
+
+cast each batch individually from sparse to dense matrix
+
+reduced config space
+
+FIX make DeepNetIterative iterative again
+
+TEST update unit tests
+
+changed values for gamma / epoch steps for the lr policies
+
+multiply decay on base lr rather than the previous lr
+
+add iterative net for regression
+
+FIX subclass correct algorithm in iterative deep network
+
+Update code for new ConfigSpace & new sklearn version
+---
+ .travis.yml                                   |   2 +
+ .../components/classification/DeepFeedNet.py  | 401 +++++++++++++++++
+ .../classification/DeepNetIterative.py        | 412 +++++++++++++++++
+ .../gaussian_random_projection.py             |  47 ++
+ .../components/regression/RegDeepNet.py       | 369 ++++++++++++++++
+ .../regression/RegDeepNetIterative.py         | 414 ++++++++++++++++++
+ .../implementations/FeedForwardNet.py         | 373 ++++++++++++++++
+ autosklearn/pipeline/util.py                  |  14 +-
+ .../classification/test_deepfeednet.py        |  61 +++
+ .../classification/test_deepnetiterative.py   |  69 +++
+ .../feature_preprocessing/test_choice.py      |   8 +-
+ .../test_gaussian_random_projection.py        |  29 ++
+ .../components/regression/test_RegDeepNet.py  |  18 +
+ .../regression/test_RegDeepNetIterative.py    |  25 ++
+ test/test_pipeline/test_base.py               |  47 +-
+ test/test_pipeline/test_classification.py     |   9 +-
+ test/test_pipeline/test_regression.py         |   5 +-
+ 17 files changed, 2260 insertions(+), 43 deletions(-)
+ create mode 100644 autosklearn/pipeline/components/classification/DeepFeedNet.py
+ create mode 100644 autosklearn/pipeline/components/classification/DeepNetIterative.py
+ create mode 100644 autosklearn/pipeline/components/feature_preprocessing/gaussian_random_projection.py
+ create mode 100644 autosklearn/pipeline/components/regression/RegDeepNet.py
+ create mode 100644 autosklearn/pipeline/components/regression/RegDeepNetIterative.py
+ create mode 100644 autosklearn/pipeline/implementations/FeedForwardNet.py
+ create mode 100644 test/test_pipeline/components/classification/test_deepfeednet.py
+ create mode 100644 test/test_pipeline/components/classification/test_deepnetiterative.py
+ create mode 100644 test/test_pipeline/components/feature_preprocessing/test_gaussian_random_projection.py
+ create mode 100644 test/test_pipeline/components/regression/test_RegDeepNet.py
+ create mode 100644 test/test_pipeline/components/regression/test_RegDeepNetIterative.py
+
+diff --git a/.travis.yml b/.travis.yml
+index 9faa0ae8..0b4793fa 100644
+--- a/.travis.yml
++++ b/.travis.yml
+@@ -72,6 +72,8 @@ install:
+   - mkdir ~/.openml
+   - echo "apikey = 610344db6388d9ba34f6db45a3cf71de" > ~/.openml/config
+   - pip install flake8
++  # Install dependencies for Auto-Net
++  - pip install theano git+https://github.com/Lasagne/Lasagne
+   # Debug output to know all exact package versions!
+   - pip freeze
+   - python setup.py install
+diff --git a/autosklearn/pipeline/components/classification/DeepFeedNet.py b/autosklearn/pipeline/components/classification/DeepFeedNet.py
+new file mode 100644
+index 00000000..96c9c546
+--- /dev/null
++++ b/autosklearn/pipeline/components/classification/DeepFeedNet.py
+@@ -0,0 +1,401 @@
++import numpy as np
++import scipy.sparse as sp
++
++from ConfigSpace import ConfigurationSpace, EqualsCondition, InCondition, \
++    UniformFloatHyperparameter, UniformIntegerHyperparameter, \
++    CategoricalHyperparameter
++
++from autosklearn.pipeline.components.base import AutoSklearnClassificationAlgorithm
++from autosklearn.pipeline.constants import *
++
++
++class DeepFeedNet(AutoSklearnClassificationAlgorithm):
++
++    def __init__(self, batch_size, num_layers, num_units_layer_1,
++                 dropout_layer_1, dropout_output, std_layer_1,
++                 learning_rate, solver, lambda2,
++                 num_units_layer_2=10, num_units_layer_3=10, num_units_layer_4=10,
++                 num_units_layer_5=10, num_units_layer_6=10,
++                 dropout_layer_2=0.5, dropout_layer_3=0.5, dropout_layer_4=0.5,
++                 dropout_layer_5=0.5, dropout_layer_6=0.5,
++                 weight_init_1='he_normal', weight_init_2='he_normal', weight_init_3='he_normal',
++                 weight_init_4='he_normal', weight_init_5='he_normal', weight_init_6='he_normal',
++                 activation_layer_1='relu', activation_layer_2='relu', activation_layer_3='relu',
++                 activation_layer_4='relu', activation_layer_5='relu', activation_layer_6='relu',
++                 leakiness_layer_1=1./3., leakiness_layer_2=1./3., leakiness_layer_3=1./3.,
++                 leakiness_layer_4=1./3., leakiness_layer_5=1./3., leakiness_layer_6=1./3.,
++                 tanh_alpha_layer_1=2./3., tanh_alpha_layer_2=2./3., tanh_alpha_layer_3=2./3.,
++                 tanh_alpha_layer_4=2./3., tanh_alpha_layer_5=2./3., tanh_alpha_layer_6=2./3.,
++                 tanh_beta_layer_1=1.7159, tanh_beta_layer_2=1.7159, tanh_beta_layer_3=1.7159,
++                 tanh_beta_layer_4=1.7159, tanh_beta_layer_5=1.7159, tanh_beta_layer_6=1.7159,
++                 std_layer_2=0.005, std_layer_3=0.005, std_layer_4=0.005,
++                 std_layer_5=0.005, std_layer_6=0.005,
++                 momentum=0.99, beta1=0.9, beta2=0.9, rho=0.95,
++                 lr_policy='fixed', gamma=0.01, power=1.0, epoch_step=1,
++                 random_state=None):
++        self.batch_size = batch_size
++        # Hacky implementation of condition on number of layers
++        self.num_layers = ord(num_layers) - ord('a')
++        self.dropout_output = dropout_output
++        self.learning_rate = learning_rate
++        self.lr_policy = lr_policy
++        self.lambda2 = lambda2
++        self.momentum = momentum
++        self.beta1 = 1-beta1
++        self.beta2 = 1-beta2
++        self.rho = rho
++        self.solver = solver
++        self.gamma = gamma
++        self.power = power
++        self.epoch_step = epoch_step
++
++        # Empty features and shape
++        self.n_features = None
++        self.input_shape = None
++        self.m_issparse = False
++        self.m_isbinary = False
++        self.m_ismultilabel = False
++
++        # To avoid eval call. Could be done with **karws
++        args = locals()
++        self.num_units_per_layer = []
++        self.dropout_per_layer = []
++        self.activation_per_layer = []
++        self.weight_init_layer = []
++        self.std_per_layer = []
++        self.leakiness_per_layer = []
++        self.tanh_alpha_per_layer = []
++        self.tanh_beta_per_layer = []
++        for i in range(1, self.num_layers):
++            self.num_units_per_layer.append(int(args.get("num_units_layer_" + str(i))))
++            self.dropout_per_layer.append(float(args.get("dropout_layer_" + str(i))))
++            self.activation_per_layer.append(args.get("activation_layer_" + str(i)))
++            self.weight_init_layer.append(args.get("weight_init_" + str(i)))
++            self.std_per_layer.append(float(args.get("std_layer_" + str(i))))
++            self.leakiness_per_layer.append(float(args.get("leakiness_layer_" + str(i))))
++            self.tanh_alpha_per_layer.append(float(args.get("tanh_alpha_layer_" + str(i))))
++            self.tanh_beta_per_layer.append(float(args.get("tanh_beta_layer_" + str(i))))
++        self.estimator = None
++        self.random_state = random_state
++
++    def _prefit(self, X, y):
++        self.batch_size = int(self.batch_size)
++        self.n_features = X.shape[1]
++        # cap batchsize to the number of data points if necessary
++        batch_size = np.min((self.batch_size, X.shape[0]))
++        self.input_shape = (batch_size, self.n_features)
++
++        assert len(self.num_units_per_layer) == self.num_layers - 1,\
++            "Number of created layers is different than actual layers"
++        assert len(self.dropout_per_layer) == self.num_layers - 1,\
++            "Number of created layers is different than actual layers"
++
++        if len(y.shape) == 2 and y.shape[1] > 1:  # Multilabel
++            self.m_ismultilabel = True
++            self.num_output_units = y.shape[1]
++        else:
++            number_classes = len(np.unique(y.astype(int)))
++            if number_classes == 2:  # Make it binary
++                self.m_isbinary = True
++                self.num_output_units = 1
++                if len(y.shape) == 1:
++                    y = y[:, np.newaxis]
++            else:
++                self.num_output_units = number_classes
++
++        self.m_issparse = sp.issparse(X)
++
++        return X, y
++
++    def fit(self, X, y):
++
++        Xf, yf = self._prefit(X, y)
++
++        #epoch = (self.number_updates * self.batch_size)//X.shape[0]
++        #number_epochs = min(max(2, epoch), 80)  # Capping of epochs
++        number_epochs = 100
++
++        from ...implementations import FeedForwardNet
++        self.estimator = FeedForwardNet.FeedForwardNet(batch_size=self.batch_size,
++                                                       input_shape=self.input_shape,
++                                                       num_layers=self.num_layers,
++                                                       num_units_per_layer=self.num_units_per_layer,
++                                                       dropout_per_layer=self.dropout_per_layer,
++                                                       activation_per_layer=self.activation_per_layer,
++                                                       weight_init_per_layer=self.weight_init_layer,
++                                                       std_per_layer=self.std_per_layer,
++                                                       leakiness_per_layer=self.leakiness_per_layer,
++                                                       tanh_alpha_per_layer=self.tanh_alpha_per_layer,
++                                                       tanh_beta_per_layer=self.tanh_beta_per_layer,
++                                                       num_output_units=self.num_output_units,
++                                                       dropout_output=self.dropout_output,
++                                                       learning_rate=self.learning_rate,
++                                                       lr_policy=self.lr_policy,
++                                                       lambda2=self.lambda2,
++                                                       momentum=self.momentum,
++                                                       beta1=self.beta1,
++                                                       beta2=self.beta2,
++                                                       rho=self.rho,
++                                                       solver=self.solver,
++                                                       num_epochs=number_epochs,
++                                                       gamma=self.gamma,
++                                                       power=self.power,
++                                                       epoch_step=self.epoch_step,
++                                                       is_sparse=self.m_issparse,
++                                                       is_binary=self.m_isbinary,
++                                                       is_multilabel=self.m_ismultilabel,
++                                                       random_state=self.random_state)
++        self.estimator.fit(Xf, yf)
++        return self
++
++    def predict(self, X):
++        if self.estimator is None:
++            raise NotImplementedError
++        return self.estimator.predict(X, self.m_issparse)
++
++    def predict_proba(self, X):
++        if self.estimator is None:
++            raise NotImplementedError()
++        return self.estimator.predict_proba(X, self.m_issparse)
++
++    @staticmethod
++    def get_properties(dataset_properties=None):
++        return {'shortname': 'feed_nn',
++                'name': 'Feed Forward Neural Network',
++                'handles_regression': False,
++                'handles_classification': True,
++                'handles_multiclass': True,
++                'handles_multilabel': True,
++                'is_deterministic': True,
++                'input': (DENSE, SPARSE, UNSIGNED_DATA),
++                'output': (PREDICTIONS,)}
++
++    @staticmethod
++    def get_hyperparameter_search_space(dataset_properties=None):
++
++        max_num_layers = 7  # Maximum number of layers coded
++
++        # Hacky way to condition layers params based on the number of layers
++        # 'c'=1, 'd'=2, 'e'=3 ,'f'=4', g ='5', h='6' + output_layer
++        layer_choices = [chr(i) for i in range(ord('c'), ord('b')+max_num_layers)]
++
++        batch_size = UniformIntegerHyperparameter("batch_size",
++                                                  #32, 4096,
++                                                  32, 256,
++                                                  log=True,
++                                                  default_value=32)
++
++        #number_updates = UniformIntegerHyperparameter("number_updates",
++        #                                              50, 3500,
++        #                                              log=True,
++        #                                              default_value=200)
++
++        num_layers = CategoricalHyperparameter("num_layers",
++                                               choices=layer_choices,
++                                               default_value='c')
++
++        lr = UniformFloatHyperparameter("learning_rate", 1e-6, 1.0,
++                                        log=True,
++                                        default_value=0.01)
++
++        l2 = UniformFloatHyperparameter("lambda2", 1e-7, 1e-2,
++                                        log=True,
++                                        default_value=1e-4)
++
++        dropout_output = UniformFloatHyperparameter("dropout_output",
++                                                    0.0, 0.99,
++                                                    default_value=0.5)
++
++        # Define basic hyperparameters and define the config space
++        # basic means that are independent from the number of layers
++
++        cs = ConfigurationSpace()
++        # cs.add_hyperparameter(number_epochs)
++        #cs.add_hyperparameter(number_updates)
++        cs.add_hyperparameter(batch_size)
++        cs.add_hyperparameter(num_layers)
++        cs.add_hyperparameter(lr)
++        cs.add_hyperparameter(l2)
++        cs.add_hyperparameter(dropout_output)
++
++        #  Define parameters with different child parameters and conditions
++        solver_choices = ["adam", "adadelta", "adagrad",
++                          "sgd", "momentum", "nesterov",
++                          "smorm3s"]
++
++        solver = CategoricalHyperparameter(name="solver",
++                                           choices=solver_choices,
++                                           default_value="smorm3s")
++
++        beta1 = UniformFloatHyperparameter("beta1", 1e-4, 0.1,
++                                           log=True,
++                                           default_value=0.1)
++
++        beta2 = UniformFloatHyperparameter("beta2", 1e-4, 0.1,
++                                           log=True,
++                                           default_value=0.01)
++
++        rho = UniformFloatHyperparameter("rho", 0.05, 0.99,
++                                         log=True,
++                                         default_value=0.95)
++
++        momentum = UniformFloatHyperparameter("momentum", 0.3, 0.999,
++                                              default_value=0.9)
++
++        # TODO: Add policy based on this sklearn sgd
++        policy_choices = ['fixed', 'inv', 'exp', 'step']
++
++        lr_policy = CategoricalHyperparameter(name="lr_policy",
++                                              choices=policy_choices,
++                                              default_value='fixed')
++
++        gamma = UniformFloatHyperparameter(name="gamma",
++                                           lower=1e-3, upper=1e-1,
++                                           default_value=1e-2)
++
++        power = UniformFloatHyperparameter("power",
++                                           0.0, 1.0,
++                                           default_value=0.5)
++
++        epoch_step = UniformIntegerHyperparameter("epoch_step",
++                                                  2, 20,
++                                                  default_value=5)
++
++        cs.add_hyperparameter(solver)
++        cs.add_hyperparameter(beta1)
++        cs.add_hyperparameter(beta2)
++        cs.add_hyperparameter(momentum)
++        cs.add_hyperparameter(rho)
++        cs.add_hyperparameter(lr_policy)
++        cs.add_hyperparameter(gamma)
++        cs.add_hyperparameter(power)
++        cs.add_hyperparameter(epoch_step)
++
++        # Define parameters that are needed it for each layer
++        output_activation_choices = ['softmax', 'sigmoid', 'softplus', 'tanh']
++
++        activations_choices = ['sigmoid', 'tanh', 'scaledTanh', 'elu', 'relu', 'leaky', 'linear']
++
++        # http://lasagne.readthedocs.io/en/latest/modules/nonlinearities.html
++        # #lasagne.nonlinearities.ScaledTanH
++        # For normalized inputs, tanh_alpha = 2./3. and tanh_beta = 1.7159,
++        # according to http://yann.lecun.com/exdb/publis/pdf/lecun-98b.pdf
++        # TODO: Review the bounds on  tanh_alpha and tanh_beta
++
++        weight_choices = ['constant', 'normal', 'uniform',
++                          'glorot_normal', 'glorot_uniform',
++                          'he_normal', 'he_uniform',
++                          'ortogonal', 'sparse']
++
++        # Iterate over parameters that are used in each layer
++        for i in range(1, max_num_layers):
++            layer_units = UniformIntegerHyperparameter("num_units_layer_" + str(i),
++                                                       64, 1024,
++                                                       log=True,
++                                                       default_value=128)
++            cs.add_hyperparameter(layer_units)
++            layer_dropout = UniformFloatHyperparameter("dropout_layer_" + str(i),
++                                                       0.0, 0.99,
++                                                       default_value=0.5)
++            cs.add_hyperparameter(layer_dropout)
++            weight_initialization = CategoricalHyperparameter('weight_init_' + str(i),
++                                                              choices=weight_choices,
++                                                              default_value='he_normal')
++            cs.add_hyperparameter(weight_initialization)
++            layer_std = UniformFloatHyperparameter("std_layer_" + str(i),
++                                                   1e-6, 0.1,
++                                                   log=True,
++                                                   default_value=0.005)
++            cs.add_hyperparameter(layer_std)
++            layer_activation = CategoricalHyperparameter("activation_layer_" + str(i),
++                                                         choices=activations_choices,
++                                                         default_value="relu")
++            cs.add_hyperparameter(layer_activation)
++            # layer_leakiness = UniformFloatHyperparameter('leakiness_layer_' + str(i),
++            #                                              0.01, 0.99,
++            #                                              default_value=0.3)
++            #
++            # cs.add_hyperparameter(layer_leakiness)
++            # layer_tanh_alpha = UniformFloatHyperparameter('tanh_alpha_layer_' + str(i),
++            #                                               0.5, 1.0,
++            #                                               default_value=2./3.)
++            # cs.add_hyperparameter(layer_tanh_alpha)
++            # layer_tanh_beta = UniformFloatHyperparameter('tanh_beta_layer_' + str(i),
++            #                                              1.1, 3.0,
++            #                                              log=True,
++            #                                              default_value=1.7159)
++            # cs.add_hyperparameter(layer_tanh_beta)
++
++        # TODO: Could be in a function in a new module
++        for i in range(2, max_num_layers):
++            # Condition layers parameter on layer choice
++            layer_unit_param = cs.get_hyperparameter("num_units_layer_" + str(i))
++            layer_cond = InCondition(child=layer_unit_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i-1:]])
++            cs.add_condition(layer_cond)
++            # Condition dropout parameter on layer choice
++            layer_dropout_param = cs.get_hyperparameter("dropout_layer_" + str(i))
++            layer_cond = InCondition(child=layer_dropout_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i-1:]])
++            cs.add_condition(layer_cond)
++            # Condition weight initialization on layer choice
++            layer_weight_param = cs.get_hyperparameter("weight_init_" + str(i))
++            layer_cond = InCondition(child=layer_weight_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i-1:]])
++            cs.add_condition(layer_cond)
++            # Condition std parameter on weight layer initialization choice
++            layer_std_param = cs.get_hyperparameter("std_layer_" + str(i))
++            weight_cond = EqualsCondition(child=layer_std_param,
++                                          parent=layer_weight_param,
++                                          value='normal')
++            cs.add_condition(weight_cond)
++            # Condition activation parameter on layer choice
++            layer_activation_param = cs.get_hyperparameter("activation_layer_" + str(i))
++            layer_cond = InCondition(child=layer_activation_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i-1:]])
++            cs.add_condition(layer_cond)
++            # Condition leakiness on activation choice
++            # layer_leakiness_param = cs.get_hyperparameter("leakiness_layer_" + str(i))
++            # activation_cond = EqualsCondition(child=layer_leakiness_param,
++            #                                   parent=layer_activation_param,
++            #                                   value='leaky')
++            # cs.add_condition(activation_cond)
++            # # Condition tanh on activation choice
++            # layer_tanh_alpha_param = cs.get_hyperparameter("tanh_alpha_layer_" + str(i))
++            # activation_cond = EqualsCondition(child=layer_tanh_alpha_param,
++            #                                   parent=layer_activation_param,
++            #                                   value='scaledTanh')
++            # cs.add_condition(activation_cond)
++            # layer_tanh_beta_param = cs.get_hyperparameter("tanh_beta_layer_" + str(i))
++            # activation_cond = EqualsCondition(child=layer_tanh_beta_param,
++            #                                   parent=layer_activation_param,
++            #                                   value='scaledTanh')
++            # cs.add_condition(activation_cond)
++
++        # Conditioning on solver
++        momentum_depends_on_solver = InCondition(momentum, solver,
++                                                 values=["momentum", "nesterov"])
++        beta1_depends_on_solver = EqualsCondition(beta1, solver, "adam")
++        beta2_depends_on_solver = EqualsCondition(beta2, solver, "adam")
++        rho_depends_on_solver = EqualsCondition(rho, solver, "adadelta")
++
++        cs.add_condition(momentum_depends_on_solver)
++        cs.add_condition(beta1_depends_on_solver)
++        cs.add_condition(beta2_depends_on_solver)
++        cs.add_condition(rho_depends_on_solver)
++
++        # Conditioning on learning rate policy
++        lr_policy_depends_on_solver = InCondition(lr_policy, solver,
++                                                  ["adadelta", "adagrad", "sgd",
++                                                   "momentum", "nesterov"])
++        gamma_depends_on_policy = InCondition(child=gamma, parent=lr_policy,
++                                              values=["inv", "exp", "step"])
++        power_depends_on_policy = EqualsCondition(power, lr_policy, "inv")
++        epoch_step_depends_on_policy = EqualsCondition(epoch_step, lr_policy, "step")
++
++        cs.add_condition(lr_policy_depends_on_solver)
++        cs.add_condition(gamma_depends_on_policy)
++        cs.add_condition(power_depends_on_policy)
++        cs.add_condition(epoch_step_depends_on_policy)
++
++        return cs
+diff --git a/autosklearn/pipeline/components/classification/DeepNetIterative.py b/autosklearn/pipeline/components/classification/DeepNetIterative.py
+new file mode 100644
+index 00000000..7c518653
+--- /dev/null
++++ b/autosklearn/pipeline/components/classification/DeepNetIterative.py
+@@ -0,0 +1,412 @@
++"""
++ Iterative fit Deep Neural Network
++ Created: Hector Mendoza
++"""
++
++import numpy as np
++import scipy.sparse as sp
++
++from ConfigSpace import ConfigurationSpace, EqualsCondition, InCondition, \
++    UniformFloatHyperparameter, UniformIntegerHyperparameter, \
++    CategoricalHyperparameter
++
++from autosklearn.pipeline.components.base import AutoSklearnClassificationAlgorithm
++from autosklearn.pipeline.constants import *
++
++
++class DeepNetIterative(AutoSklearnClassificationAlgorithm):
++    def __init__(self, batch_size, num_layers,
++                 dropout_output, learning_rate, solver,
++                 lambda2, number_epochs=None, random_state=None,
++                 **kwargs):
++        if number_epochs is not None:
++            self.number_epochs = number_epochs
++        else:
++            self.number_epochs = 100
++        self.batch_size = batch_size
++        self.num_layers = ord(num_layers) - ord('a')
++        self.dropout_output = dropout_output
++        self.learning_rate = learning_rate
++        self.lambda2 = lambda2
++        self.solver = solver
++
++        # Also taken from **kwargs. Because the assigned
++        # arguments are the minimum parameters to run
++        # the iterative net. IMO.
++        self.lr_policy = kwargs.get("lr_policy", "fixed")
++        self.momentum = kwargs.get("momentum", 0.99)
++        self.beta1 = 1 - kwargs.get("beta1", 0.1)
++        self.beta2 = 1 - kwargs.get("beta2", 0.01)
++        self.rho = kwargs.get("rho", 0.95)
++        self.gamma = kwargs.get("gamma", 0.01)
++        self.power = kwargs.get("power", 1.0)
++        self.epoch_step = kwargs.get("epoch_step", 1)
++        # Add special iterative member
++        self._iterations = 0
++
++        # Empty features and shape
++        self.n_features = None
++        self.input_shape = None
++        self.m_issparse = False
++        self.m_isbinary = False
++        self.m_ismultilabel = False
++
++        # TODO: Should one add a try-except here?
++        self.num_units_per_layer = []
++        self.dropout_per_layer = []
++        self.activation_per_layer = []
++        self.weight_init_layer = []
++        self.std_per_layer = []
++        self.leakiness_per_layer = []
++        self.tanh_alpha_per_layer = []
++        self.tanh_beta_per_layer = []
++        for i in range(1, self.num_layers):
++            self.num_units_per_layer.append(int(kwargs.get("num_units_layer_" + str(i), 128)))
++            self.dropout_per_layer.append(float(kwargs.get("dropout_layer_" + str(i), 0.5)))
++            self.activation_per_layer.append(kwargs.get("activation_layer_" + str(i), 'relu'))
++            self.weight_init_layer.append(kwargs.get("weight_init_" + str(i), 'he_normal'))
++            self.std_per_layer.append(float(kwargs.get("std_layer_" + str(i), 0.005)))
++            self.leakiness_per_layer.append(float(kwargs.get("leakiness_layer_" + str(i), 1./3.)))
++            self.tanh_alpha_per_layer.append(float(kwargs.get("tanh_alpha_layer_" + str(i), 2./3.)))
++            self.tanh_beta_per_layer.append(float(kwargs.get("tanh_beta_layer_" + str(i), 1.7159)))
++        self.estimator = None
++        self.random_state = random_state
++
++    def _prefit(self, X, y):
++        self.batch_size = int(self.batch_size)
++        self.n_features = X.shape[1]
++        # cap batchsize to the number of data points if necessary
++        batch_size = np.min((self.batch_size, X.shape[0]))
++        self.input_shape = (batch_size, self.n_features)
++
++        assert len(self.num_units_per_layer) == self.num_layers - 1,\
++            "Number of created layers is different than actual layers"
++        assert len(self.dropout_per_layer) == self.num_layers - 1,\
++            "Number of created layers is different than actual layers"
++
++        if len(y.shape) == 2 and y.shape[1] > 1:  # Multilabel
++            self.m_ismultilabel = True
++            self.num_output_units = y.shape[1]
++        else:
++            number_classes = len(np.unique(y.astype(int)))
++            if number_classes == 2:  # Make it binary
++                self.m_isbinary = True
++                self.num_output_units = 1
++                if len(y.shape) == 1:
++                    y = y[:, np.newaxis]
++            else:
++                self.num_output_units = number_classes
++
++        self.m_issparse = sp.issparse(X)
++
++        return X, y
++
++    def fit(self, X, y, sample_weight=None):
++
++        Xf, yf = self._prefit(X, y)
++        while not self.configuration_fully_fitted():
++            self.iterative_fit(Xf, yf, n_iter=1, sample_weight=sample_weight)
++
++        return self
++
++    def iterative_fit(self, X, y, n_iter=1, refit=False, sample_weight=None):
++        Xf, yf = self._prefit(X, y)
++
++        if refit:
++            self.estimator = None
++
++        if self.estimator is None:
++            self._iterations = 1
++            from ...implementations import FeedForwardNet
++            self.estimator = FeedForwardNet.FeedForwardNet(batch_size=self.batch_size,
++                                                           input_shape=self.input_shape,
++                                                           num_layers=self.num_layers,
++                                                           num_units_per_layer=self.num_units_per_layer,
++                                                           dropout_per_layer=self.dropout_per_layer,
++                                                           activation_per_layer=self.activation_per_layer,
++                                                           weight_init_per_layer=self.weight_init_layer,
++                                                           std_per_layer=self.std_per_layer,
++                                                           leakiness_per_layer=self.leakiness_per_layer,
++                                                           tanh_alpha_per_layer=self.tanh_alpha_per_layer,
++                                                           tanh_beta_per_layer=self.tanh_beta_per_layer,
++                                                           num_output_units=self.num_output_units,
++                                                           dropout_output=self.dropout_output,
++                                                           learning_rate=self.learning_rate,
++                                                           lr_policy=self.lr_policy,
++                                                           lambda2=self.lambda2,
++                                                           momentum=self.momentum,
++                                                           beta1=self.beta1,
++                                                           beta2=self.beta2,
++                                                           rho=self.rho,
++                                                           solver=self.solver,
++                                                           num_epochs=1,
++                                                           gamma=self.gamma,
++                                                           power=self.power,
++                                                           epoch_step=self.epoch_step,
++                                                           is_sparse=self.m_issparse,
++                                                           is_binary=self.m_isbinary,
++                                                           is_multilabel=self.m_ismultilabel,
++                                                           random_state=self.random_state)
++        self.estimator.num_epochs = n_iter
++        # print('Increasing epochs %d' % n_iter)
++        # print('Iterations: %d' % self._iterations)
++        self.estimator.fit(Xf, yf)
++
++        if self._iterations >= self.number_epochs:
++            self._fully_fit = True
++        self._iterations += n_iter
++        return self
++
++    def estimator_supports_iterative_fit(self):
++        return True
++
++    def configuration_fully_fitted(self):
++        if self.estimator is None:
++            return False
++        elif not hasattr(self, '_fully_fit'):
++            return False
++        else:
++            return self._fully_fit
++
++    def predict(self, X):
++        if self.estimator is None:
++            raise NotImplementedError
++        return self.estimator.predict(X, self.m_issparse)
++
++    def predict_proba(self, X):
++        if self.estimator is None:
++            raise NotImplementedError()
++        return self.estimator.predict_proba(X, self.m_issparse)
++
++    @staticmethod
++    def get_properties(dataset_properties=None):
++        return {'shortname': 'feed_nn_iter',
++                'name': 'Feed Forward Neural Network Iterative',
++                'handles_regression': False,
++                'handles_classification': True,
++                'handles_multiclass': True,
++                'handles_multilabel': True,
++                'is_deterministic': True,
++                'input': (DENSE, SPARSE, UNSIGNED_DATA),
++                'output': (PREDICTIONS,)}
++
++    @staticmethod
++    def get_hyperparameter_search_space(dataset_properties=None):
++        max_num_layers = 7  # Maximum number of layers coded
++
++        # Hacky way to condition layers params based on the number of layers
++        # 'c'=1, 'd'=2, 'e'=3 ,'f'=4', g ='5', h='6' + output_layer
++        layer_choices = [chr(i) for i in range(ord('c'), ord('b') + max_num_layers)]
++
++        batch_size = UniformIntegerHyperparameter("batch_size",
++                                                  32, 4096,
++                                                  log=True,
++                                                  default_value=32)
++
++        # number_epochs = UniformIntegerHyperparameter("number_epochs",
++        #                                              2, 80,
++        #                                              default_value=5)
++
++        num_layers = CategoricalHyperparameter("num_layers",
++                                               choices=layer_choices,
++                                               default_value='c')
++
++        lr = UniformFloatHyperparameter("learning_rate", 1e-6, 1.0,
++                                        log=True,
++                                        default_value=0.01)
++
++        l2 = UniformFloatHyperparameter("lambda2", 1e-7, 1e-2,
++                                        log=True,
++                                        default_value=1e-4)
++
++        dropout_output = UniformFloatHyperparameter("dropout_output",
++                                                    0.0, 0.99,
++                                                    default_value=0.5)
++
++        # Define basic hyperparameters and define the config space
++        # basic means that are independent from the number of layers
++
++        cs = ConfigurationSpace()
++        # cs.add_hyperparameter(number_epochs)
++        cs.add_hyperparameter(batch_size)
++        cs.add_hyperparameter(num_layers)
++        cs.add_hyperparameter(lr)
++        cs.add_hyperparameter(l2)
++        cs.add_hyperparameter(dropout_output)
++
++        #  Define parameters with different child parameters and conditions
++        solver_choices = ["adam", "adadelta", "adagrad",
++                          "sgd", "momentum", "nesterov",
++                          "smorm3s"]
++
++        solver = CategoricalHyperparameter(name="solver",
++                                           choices=solver_choices,
++                                           default_value="smorm3s")
++
++        beta1 = UniformFloatHyperparameter("beta1", 1e-4, 0.1,
++                                           log=True,
++                                           default_value=0.1)
++
++        beta2 = UniformFloatHyperparameter("beta2", 1e-4, 0.1,
++                                           log=True,
++                                           default_value=0.01)
++
++        rho = UniformFloatHyperparameter("rho", 0.05, 0.99,
++                                         log=True,
++                                         default_value=0.95)
++
++        momentum = UniformFloatHyperparameter("momentum", 0.3, 0.999,
++                                              default_value=0.9)
++
++        # TODO: Add policy based on this sklearn sgd
++        policy_choices = ['fixed', 'inv', 'exp', 'step']
++
++        lr_policy = CategoricalHyperparameter(name="lr_policy",
++                                              choices=policy_choices,
++                                              default_value='fixed')
++
++        gamma = UniformFloatHyperparameter(name="gamma",
++                                           lower=1e-1, upper=1e0,
++                                           default_value=1e-1,
++                                           log=True)
++
++        power = UniformFloatHyperparameter("power",
++                                           0.0, 1.0,
++                                           default_value=0.5)
++
++        epoch_step = UniformIntegerHyperparameter("epoch_step",
++                                                  5, 50,
++                                                  default_value=5)
++
++        cs.add_hyperparameter(solver)
++        cs.add_hyperparameter(beta1)
++        cs.add_hyperparameter(beta2)
++        cs.add_hyperparameter(momentum)
++        cs.add_hyperparameter(rho)
++        cs.add_hyperparameter(lr_policy)
++        cs.add_hyperparameter(gamma)
++        cs.add_hyperparameter(power)
++        cs.add_hyperparameter(epoch_step)
++
++        # Define parameters that are needed it for each layer
++        output_activation_choices = ['softmax', 'sigmoid', 'softplus', 'tanh']
++
++        activations_choices = ['sigmoid', 'tanh', 'scaledTanh', 'elu', 'relu', 'leaky', 'linear']
++
++        weight_choices = ['constant', 'normal', 'uniform',
++                          'glorot_normal', 'glorot_uniform',
++                          'he_normal', 'he_uniform',
++                          'ortogonal', 'sparse']
++
++        # Iterate over parameters that are used in each layer
++        for i in range(1, max_num_layers):
++            layer_units = UniformIntegerHyperparameter("num_units_layer_" + str(i),
++                                                       64, 1024,
++                                                       log=True,
++                                                       default_value=128)
++            cs.add_hyperparameter(layer_units)
++            layer_dropout = UniformFloatHyperparameter("dropout_layer_" + str(i),
++                                                       0.0, 0.99,
++                                                       default_value=0.5)
++            cs.add_hyperparameter(layer_dropout)
++            weight_initialization = CategoricalHyperparameter('weight_init_' + str(i),
++                                                              choices=weight_choices,
++                                                              default_value='he_normal')
++            cs.add_hyperparameter(weight_initialization)
++            layer_std = UniformFloatHyperparameter("std_layer_" + str(i),
++                                                   1e-6, 0.1,
++                                                   log=True,
++                                                   default_value=0.005)
++            cs.add_hyperparameter(layer_std)
++            layer_activation = CategoricalHyperparameter("activation_layer_" + str(i),
++                                                         choices=activations_choices,
++                                                         default_value="relu")
++            cs.add_hyperparameter(layer_activation)
++            # layer_leakiness = UniformFloatHyperparameter('leakiness_layer_' + str(i),
++            #                                              0.01, 0.99,
++            #                                              default_value=0.3)
++            #
++            # cs.add_hyperparameter(layer_leakiness)
++            # layer_tanh_alpha = UniformFloatHyperparameter('tanh_alpha_layer_' + str(i),
++            #                                               0.5, 1.0,
++            #                                               default_value=2. / 3.)
++            # cs.add_hyperparameter(layer_tanh_alpha)
++            # layer_tanh_beta = UniformFloatHyperparameter('tanh_beta_layer_' + str(i),
++            #                                              1.1, 3.0,
++            #                                              log=True,
++            #                                              default_value=1.7159)
++            # cs.add_hyperparameter(layer_tanh_beta)
++
++        # TODO: Could be in a function in a new module
++        for i in range(2, max_num_layers):
++            # Condition layers parameter on layer choice
++            layer_unit_param = cs.get_hyperparameter("num_units_layer_" + str(i))
++            layer_cond = InCondition(child=layer_unit_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i - 1:]])
++            cs.add_condition(layer_cond)
++            # Condition dropout parameter on layer choice
++            layer_dropout_param = cs.get_hyperparameter("dropout_layer_" + str(i))
++            layer_cond = InCondition(child=layer_dropout_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i - 1:]])
++            cs.add_condition(layer_cond)
++            # Condition weight initialization on layer choice
++            layer_weight_param = cs.get_hyperparameter("weight_init_" + str(i))
++            layer_cond = InCondition(child=layer_weight_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i - 1:]])
++            cs.add_condition(layer_cond)
++            # Condition std parameter on weight layer initialization choice
++            layer_std_param = cs.get_hyperparameter("std_layer_" + str(i))
++            weight_cond = EqualsCondition(child=layer_std_param,
++                                          parent=layer_weight_param,
++                                          value='normal')
++            cs.add_condition(weight_cond)
++            # Condition activation parameter on layer choice
++            layer_activation_param = cs.get_hyperparameter("activation_layer_" + str(i))
++            layer_cond = InCondition(child=layer_activation_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i - 1:]])
++            cs.add_condition(layer_cond)
++            # # Condition leakiness on activation choice
++            # layer_leakiness_param = cs.get_hyperparameter("leakiness_layer_" + str(i))
++            # activation_cond = EqualsCondition(child=layer_leakiness_param,
++            #                                   parent=layer_activation_param,
++            #                                   value='leaky')
++            # cs.add_condition(activation_cond)
++            # # Condition tanh on activation choice
++            # layer_tanh_alpha_param = cs.get_hyperparameter("tanh_alpha_layer_" + str(i))
++            # activation_cond = EqualsCondition(child=layer_tanh_alpha_param,
++            #                                   parent=layer_activation_param,
++            #                                   value='scaledTanh')
++            # cs.add_condition(activation_cond)
++            # layer_tanh_beta_param = cs.get_hyperparameter("tanh_beta_layer_" + str(i))
++            # activation_cond = EqualsCondition(child=layer_tanh_beta_param,
++            #                                   parent=layer_activation_param,
++            #                                   value='scaledTanh')
++            # cs.add_condition(activation_cond)
++
++        # Conditioning on solver
++        momentum_depends_on_solver = InCondition(momentum, solver,
++                                                 values=["momentum", "nesterov"])
++        beta1_depends_on_solver = EqualsCondition(beta1, solver, "adam")
++        beta2_depends_on_solver = EqualsCondition(beta2, solver, "adam")
++        rho_depends_on_solver = EqualsCondition(rho, solver, "adadelta")
++
++        cs.add_condition(momentum_depends_on_solver)
++        cs.add_condition(beta1_depends_on_solver)
++        cs.add_condition(beta2_depends_on_solver)
++        cs.add_condition(rho_depends_on_solver)
++
++        # Conditioning on learning rate policy
++        lr_policy_depends_on_solver = InCondition(lr_policy, solver,
++                                                  ["adadelta", "adagrad", "sgd",
++                                                   "momentum", "nesterov"])
++        gamma_depends_on_policy = InCondition(child=gamma, parent=lr_policy,
++                                              values=["inv", "exp", "step"])
++        power_depends_on_policy = EqualsCondition(power, lr_policy, "inv")
++        epoch_step_depends_on_policy = EqualsCondition(epoch_step, lr_policy, "step")
++
++        cs.add_condition(lr_policy_depends_on_solver)
++        cs.add_condition(gamma_depends_on_policy)
++        cs.add_condition(power_depends_on_policy)
++        cs.add_condition(epoch_step_depends_on_policy)
++
++        return cs
+diff --git a/autosklearn/pipeline/components/feature_preprocessing/gaussian_random_projection.py b/autosklearn/pipeline/components/feature_preprocessing/gaussian_random_projection.py
+new file mode 100644
+index 00000000..c4026277
+--- /dev/null
++++ b/autosklearn/pipeline/components/feature_preprocessing/gaussian_random_projection.py
+@@ -0,0 +1,47 @@
++import numpy as np
++
++from ConfigSpace import ConfigurationSpace, UniformFloatHyperparameter
++
++from autosklearn.pipeline.components.base import AutoSklearnPreprocessingAlgorithm
++from autosklearn.pipeline.constants import *
++
++
++class GaussRandomProjection(AutoSklearnPreprocessingAlgorithm):
++    def __init__(self, eps, random_state=None):
++        self.eps = eps
++        self.random_state = random_state
++        self.preprocessor = None
++
++    def fit(self, X, Y):
++        import sklearn.random_projection
++
++        self.preprocessor = sklearn.random_projection.GaussianRandomProjection(
++            eps=self.eps)
++        self.preprocessor.fit(X, Y)
++
++        return self
++
++    def transform(self, X):
++        if self.preprocessor is None:
++            raise NotImplementedError()
++        return self.preprocessor.transform(X)
++
++    @staticmethod
++    def get_properties(dataset_properties=None):
++        return {'shortname': 'random_projection',
++                'name': 'Random Gaussian Projection',
++                'handles_regression': True,
++                'handles_classification': True,
++                'handles_multiclass': True,
++                'handles_multilabel': True,
++                'is_deterministic': True,
++                'input': (DENSE, SPARSE, UNSIGNED_DATA),
++                'output': (DENSE, INPUT)}
++
++    @staticmethod
++    def get_hyperparameter_search_space(dataset_properties=None):
++        admissible_distortion = UniformFloatHyperparameter(
++            "eps", 0.01, 1.0, default_value=0.5)
++        cs = ConfigurationSpace()
++        cs.add_hyperparameter(admissible_distortion)
++        return cs
+diff --git a/autosklearn/pipeline/components/regression/RegDeepNet.py b/autosklearn/pipeline/components/regression/RegDeepNet.py
+new file mode 100644
+index 00000000..10fb9817
+--- /dev/null
++++ b/autosklearn/pipeline/components/regression/RegDeepNet.py
+@@ -0,0 +1,369 @@
++import numpy as np
++import scipy.sparse as sp
++
++from ConfigSpace import ConfigurationSpace, EqualsCondition, InCondition, \
++    UniformFloatHyperparameter, UniformIntegerHyperparameter, \
++    CategoricalHyperparameter
++
++from autosklearn.pipeline.components.base import AutoSklearnRegressionAlgorithm
++from autosklearn.pipeline.constants import *
++
++
++class RegDeepNet(AutoSklearnRegressionAlgorithm):
++    def __init__(self, number_epochs, batch_size, num_layers,
++                 dropout_output, learning_rate, solver,
++                 lambda2, random_state=None,
++                 **kwargs):
++        self.number_epochs = number_epochs
++        self.batch_size = batch_size
++        self.num_layers = ord(num_layers) - ord('a')
++        self.dropout_output = dropout_output
++        self.learning_rate = learning_rate
++        self.lambda2 = lambda2
++        self.solver = solver
++
++        # Also taken from **kwargs. Because the assigned
++        # arguments are the minimum parameters to run
++        # the iterative net. IMO.
++        self.lr_policy = kwargs.get("lr_policy", "fixed")
++        self.momentum = kwargs.get("momentum", 0.99)
++        self.beta1 = 1 - kwargs.get("beta1", 0.1)
++        self.beta2 = 1 - kwargs.get("beta2", 0.01)
++        self.rho = kwargs.get("rho", 0.95)
++        self.gamma = kwargs.get("gamma", 0.01)
++        self.power = kwargs.get("power", 1.0)
++        self.epoch_step = kwargs.get("epoch_step", 1)
++
++        # Empty features and shape
++        self.n_features = None
++        self.input_shape = None
++        self.m_issparse = False
++        self.m_isbinary = False
++        self.m_ismultilabel = False
++        self.m_isregression = True
++
++        # TODO: Should one add a try-except here?
++        self.num_units_per_layer = []
++        self.dropout_per_layer = []
++        self.activation_per_layer = []
++        self.weight_init_layer = []
++        self.std_per_layer = []
++        self.leakiness_per_layer = []
++        self.tanh_alpha_per_layer = []
++        self.tanh_beta_per_layer = []
++        for i in range(1, self.num_layers):
++            self.num_units_per_layer.append(int(kwargs.get("num_units_layer_" + str(i), 128)))
++            self.dropout_per_layer.append(float(kwargs.get("dropout_layer_" + str(i), 0.5)))
++            self.activation_per_layer.append(kwargs.get("activation_layer_" + str(i), 'relu'))
++            self.weight_init_layer.append(kwargs.get("weight_init_" + str(i), 'he_normal'))
++            self.std_per_layer.append(float(kwargs.get("std_layer_" + str(i), 0.005)))
++            self.leakiness_per_layer.append(float(kwargs.get("leakiness_layer_" + str(i), 1. / 3.)))
++            self.tanh_alpha_per_layer.append(float(kwargs.get("tanh_alpha_layer_" + str(i), 2. / 3.)))
++            self.tanh_beta_per_layer.append(float(kwargs.get("tanh_beta_layer_" + str(i), 1.7159)))
++        self.estimator = None
++        self.random_state = random_state
++
++    def _prefit(self, X, y):
++        self.batch_size = int(self.batch_size)
++        self.n_features = X.shape[1]
++        # cap batchsize to the number of data points if necessary
++        batch_size = np.min((self.batch_size, X.shape[0]))
++        self.input_shape = (batch_size, self.n_features)
++
++        assert len(self.num_units_per_layer) == self.num_layers - 1,\
++            "Number of created layers is different than actual layers"
++        assert len(self.dropout_per_layer) == self.num_layers - 1,\
++            "Number of created layers is different than actual layers"
++
++        self.num_output_units = 1  # Regression
++        # Normalize the output
++        self.mean_y = np.mean(y)
++        self.std_y = np.std(y)
++        y = (y - self.mean_y) / self.std_y
++        if len(y.shape) == 1:
++            y = y[:, np.newaxis]
++
++        self.m_issparse = sp.issparse(X)
++
++        return X, y
++
++    def fit(self, X, y):
++
++        Xf, yf = self._prefit(X, y)
++
++        from ...implementations import FeedForwardNet
++        self.estimator = FeedForwardNet.FeedForwardNet(batch_size=self.batch_size,
++                                                       input_shape=self.input_shape,
++                                                       num_layers=self.num_layers,
++                                                       num_units_per_layer=self.num_units_per_layer,
++                                                       dropout_per_layer=self.dropout_per_layer,
++                                                       activation_per_layer=self.activation_per_layer,
++                                                       weight_init_per_layer=self.weight_init_layer,
++                                                       std_per_layer=self.std_per_layer,
++                                                       leakiness_per_layer=self.leakiness_per_layer,
++                                                       tanh_alpha_per_layer=self.tanh_alpha_per_layer,
++                                                       tanh_beta_per_layer=self.tanh_beta_per_layer,
++                                                       num_output_units=self.num_output_units,
++                                                       dropout_output=self.dropout_output,
++                                                       learning_rate=self.learning_rate,
++                                                       lr_policy=self.lr_policy,
++                                                       lambda2=self.lambda2,
++                                                       momentum=self.momentum,
++                                                       beta1=self.beta1,
++                                                       beta2=self.beta2,
++                                                       rho=self.rho,
++                                                       solver=self.solver,
++                                                       num_epochs=self.number_epochs,
++                                                       gamma=self.gamma,
++                                                       power=self.power,
++                                                       epoch_step=self.epoch_step,
++                                                       is_sparse=self.m_issparse,
++                                                       is_binary=self.m_isbinary,
++                                                       is_multilabel=self.m_ismultilabel,
++                                                       is_regression=self.m_isregression,
++                                                       random_state=self.random_state)
++        self.estimator.fit(Xf, yf)
++        return self
++
++    def predict(self, X):
++        if self.estimator is None:
++            raise NotImplementedError
++        preds = self.estimator.predict(X, self.m_issparse)
++        return preds * self.std_y + self.mean_y
++
++    def predict_proba(self, X):
++        if self.estimator is None:
++            raise NotImplementedError()
++        return self.estimator.predict_proba(X, self.m_issparse)
++
++    @staticmethod
++    def get_properties(dataset_properties=None):
++        return {'shortname': 'reg_feed_nn',
++                'name': 'Regression Feed Forward Neural Network',
++                'handles_regression': True,
++                'handles_classification': False,
++                'handles_multiclass': False,
++                'handles_multilabel': False,
++                'is_deterministic': True,
++                'input': (DENSE, SPARSE, UNSIGNED_DATA),
++                'output': (PREDICTIONS,)}
++
++    @staticmethod
++    def get_hyperparameter_search_space(dataset_properties=None):
++        max_num_layers = 7  # Maximum number of layers coded
++
++        # Hacky way to condition layers params based on the number of layers
++        # 'c'=1, 'd'=2, 'e'=3 ,'f'=4', g ='5', h='6' + output_layer
++        layer_choices = [chr(i) for i in range(ord('c'), ord('b') + max_num_layers)]
++
++        batch_size = UniformIntegerHyperparameter("batch_size",
++                                                  32, 4096,
++                                                  log=True,
++                                                  default_value=32)
++
++        number_epochs = UniformIntegerHyperparameter("number_epochs",
++                                                     2, 80,
++                                                     default_value=5)
++
++        num_layers = CategoricalHyperparameter("num_layers",
++                                               choices=layer_choices,
++                                               default_value='c')
++
++        lr = UniformFloatHyperparameter("learning_rate", 1e-6, 1.0,
++                                        log=True,
++                                        default_value=0.01)
++
++        l2 = UniformFloatHyperparameter("lambda2", 1e-7, 1e-2,
++                                        log=True,
++                                        default_value=1e-4)
++
++        dropout_output = UniformFloatHyperparameter("dropout_output",
++                                                    0.0, 0.99,
++                                                    default_value=0.5)
++
++        # Define basic hyperparameters and define the config space
++        # basic means that are independent from the number of layers
++
++        cs = ConfigurationSpace()
++        cs.add_hyperparameter(number_epochs)
++        cs.add_hyperparameter(batch_size)
++        cs.add_hyperparameter(num_layers)
++        cs.add_hyperparameter(lr)
++        cs.add_hyperparameter(l2)
++        cs.add_hyperparameter(dropout_output)
++
++        #  Define parameters with different child parameters and conditions
++        solver_choices = ["adam", "adadelta", "adagrad",
++                          "sgd", "momentum", "nesterov",
++                          "smorm3s"]
++
++        solver = CategoricalHyperparameter(name="solver",
++                                           choices=solver_choices,
++                                           default_value="smorm3s")
++
++        beta1 = UniformFloatHyperparameter("beta1", 1e-4, 0.1,
++                                           log=True,
++                                           default_value=0.1)
++
++        beta2 = UniformFloatHyperparameter("beta2", 1e-4, 0.1,
++                                           log=True,
++                                           default_value=0.01)
++
++        rho = UniformFloatHyperparameter("rho", 0.05, 0.99,
++                                         log=True,
++                                         default_value=0.95)
++
++        momentum = UniformFloatHyperparameter("momentum", 0.3, 0.999,
++                                              default_value=0.9)
++
++        # TODO: Add policy based on this sklearn sgd
++        policy_choices = ['fixed', 'inv', 'exp', 'step']
++
++        lr_policy = CategoricalHyperparameter(name="lr_policy",
++                                              choices=policy_choices,
++                                              default_value='fixed')
++
++        gamma = UniformFloatHyperparameter(name="gamma",
++                                           lower=1e-3, upper=1e-1,
++                                           default_value=1e-2)
++
++        power = UniformFloatHyperparameter("power",
++                                           0.0, 1.0,
++                                           default_value=0.5)
++
++        epoch_step = UniformIntegerHyperparameter("epoch_step",
++                                                  2, 20,
++                                                  default_value=5)
++
++        cs.add_hyperparameter(solver)
++        cs.add_hyperparameter(beta1)
++        cs.add_hyperparameter(beta2)
++        cs.add_hyperparameter(momentum)
++        cs.add_hyperparameter(rho)
++        cs.add_hyperparameter(lr_policy)
++        cs.add_hyperparameter(gamma)
++        cs.add_hyperparameter(power)
++        cs.add_hyperparameter(epoch_step)
++
++        # Define parameters that are needed it for each layer
++        output_activation_choices = ['softmax', 'sigmoid', 'softplus', 'tanh']
++
++        activations_choices = ['sigmoid', 'tanh', 'scaledTanh', 'elu', 'relu', 'leaky', 'linear']
++
++        weight_choices = ['constant', 'normal', 'uniform',
++                          'glorot_normal', 'glorot_uniform',
++                          'he_normal', 'he_uniform',
++                          'ortogonal', 'sparse']
++
++        # Iterate over parameters that are used in each layer
++        for i in range(1, max_num_layers):
++            layer_units = UniformIntegerHyperparameter("num_units_layer_" + str(i),
++                                                       64, 4096,
++                                                       log=True,
++                                                       default_value=128)
++            cs.add_hyperparameter(layer_units)
++            layer_dropout = UniformFloatHyperparameter("dropout_layer_" + str(i),
++                                                       0.0, 0.99,
++                                                       default_value=0.5)
++            cs.add_hyperparameter(layer_dropout)
++            weight_initialization = CategoricalHyperparameter('weight_init_' + str(i),
++                                                              choices=weight_choices,
++                                                              default_value='he_normal')
++            cs.add_hyperparameter(weight_initialization)
++            layer_std = UniformFloatHyperparameter("std_layer_" + str(i),
++                                                   1e-6, 0.1,
++                                                   log=True,
++                                                   default_value=0.005)
++            cs.add_hyperparameter(layer_std)
++            layer_activation = CategoricalHyperparameter("activation_layer_" + str(i),
++                                                         choices=activations_choices,
++                                                         default_value="relu")
++            cs.add_hyperparameter(layer_activation)
++            layer_leakiness = UniformFloatHyperparameter('leakiness_layer_' + str(i),
++                                                         0.01, 0.99,
++                                                         default_value=0.3)
++
++            cs.add_hyperparameter(layer_leakiness)
++            layer_tanh_alpha = UniformFloatHyperparameter('tanh_alpha_layer_' + str(i),
++                                                          0.5, 1.0,
++                                                          default_value=2. / 3.)
++            cs.add_hyperparameter(layer_tanh_alpha)
++            layer_tanh_beta = UniformFloatHyperparameter('tanh_beta_layer_' + str(i),
++                                                         1.1, 3.0,
++                                                         log=True,
++                                                         default_value=1.7159)
++            cs.add_hyperparameter(layer_tanh_beta)
++
++        # TODO: Could be in a function in a new module
++        for i in range(2, max_num_layers):
++            # Condition layers parameter on layer choice
++            layer_unit_param = cs.get_hyperparameter("num_units_layer_" + str(i))
++            layer_cond = InCondition(child=layer_unit_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i - 1:]])
++            cs.add_condition(layer_cond)
++            # Condition dropout parameter on layer choice
++            layer_dropout_param = cs.get_hyperparameter("dropout_layer_" + str(i))
++            layer_cond = InCondition(child=layer_dropout_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i - 1:]])
++            cs.add_condition(layer_cond)
++            # Condition weight initialization on layer choice
++            layer_weight_param = cs.get_hyperparameter("weight_init_" + str(i))
++            layer_cond = InCondition(child=layer_weight_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i - 1:]])
++            cs.add_condition(layer_cond)
++            # Condition std parameter on weight layer initialization choice
++            layer_std_param = cs.get_hyperparameter("std_layer_" + str(i))
++            weight_cond = EqualsCondition(child=layer_std_param,
++                                          parent=layer_weight_param,
++                                          value='normal')
++            cs.add_condition(weight_cond)
++            # Condition activation parameter on layer choice
++            layer_activation_param = cs.get_hyperparameter("activation_layer_" + str(i))
++            layer_cond = InCondition(child=layer_activation_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i - 1:]])
++            cs.add_condition(layer_cond)
++            # Condition leakiness on activation choice
++            layer_leakiness_param = cs.get_hyperparameter("leakiness_layer_" + str(i))
++            activation_cond = EqualsCondition(child=layer_leakiness_param,
++                                              parent=layer_activation_param,
++                                              value='leaky')
++            cs.add_condition(activation_cond)
++            # Condition tanh on activation choice
++            layer_tanh_alpha_param = cs.get_hyperparameter("tanh_alpha_layer_" + str(i))
++            activation_cond = EqualsCondition(child=layer_tanh_alpha_param,
++                                              parent=layer_activation_param,
++                                              value='scaledTanh')
++            cs.add_condition(activation_cond)
++            layer_tanh_beta_param = cs.get_hyperparameter("tanh_beta_layer_" + str(i))
++            activation_cond = EqualsCondition(child=layer_tanh_beta_param,
++                                              parent=layer_activation_param,
++                                              value='scaledTanh')
++            cs.add_condition(activation_cond)
++
++        # Conditioning on solver
++        momentum_depends_on_solver = InCondition(momentum, solver,
++                                                 values=["momentum", "nesterov"])
++        beta1_depends_on_solver = EqualsCondition(beta1, solver, "adam")
++        beta2_depends_on_solver = EqualsCondition(beta2, solver, "adam")
++        rho_depends_on_solver = EqualsCondition(rho, solver, "adadelta")
++
++        cs.add_condition(momentum_depends_on_solver)
++        cs.add_condition(beta1_depends_on_solver)
++        cs.add_condition(beta2_depends_on_solver)
++        cs.add_condition(rho_depends_on_solver)
++
++        # Conditioning on learning rate policy
++        lr_policy_depends_on_solver = InCondition(lr_policy, solver,
++                                                  ["adadelta", "adagrad", "sgd",
++                                                   "momentum", "nesterov"])
++        gamma_depends_on_policy = InCondition(child=gamma, parent=lr_policy,
++                                              values=["inv", "exp", "step"])
++        power_depends_on_policy = EqualsCondition(power, lr_policy, "inv")
++        epoch_step_depends_on_policy = EqualsCondition(epoch_step, lr_policy, "step")
++
++        cs.add_condition(lr_policy_depends_on_solver)
++        cs.add_condition(gamma_depends_on_policy)
++        cs.add_condition(power_depends_on_policy)
++        cs.add_condition(epoch_step_depends_on_policy)
++
++        return cs
+diff --git a/autosklearn/pipeline/components/regression/RegDeepNetIterative.py b/autosklearn/pipeline/components/regression/RegDeepNetIterative.py
+new file mode 100644
+index 00000000..26af5870
+--- /dev/null
++++ b/autosklearn/pipeline/components/regression/RegDeepNetIterative.py
+@@ -0,0 +1,414 @@
++
++import numpy as np
++import scipy.sparse as sp
++
++from ConfigSpace import ConfigurationSpace, EqualsCondition, InCondition, \
++    UniformFloatHyperparameter, UniformIntegerHyperparameter, \
++    CategoricalHyperparameter
++
++from autosklearn.pipeline.components.base import AutoSklearnRegressionAlgorithm
++from autosklearn.pipeline.constants import *
++
++
++class RegDeepNetIterative(AutoSklearnRegressionAlgorithm):
++    def __init__(self, batch_size, num_layers,
++                 dropout_output, learning_rate, solver,
++                 lambda2, number_epochs=None, random_state=None,
++                 **kwargs):
++        if number_epochs is not None:
++            self.number_epochs = number_epochs
++        else:
++            self.number_epochs = 100
++        self.batch_size = batch_size
++        self.num_layers = ord(num_layers) - ord('a')
++        self.dropout_output = dropout_output
++        self.learning_rate = learning_rate
++        self.lambda2 = lambda2
++        self.solver = solver
++
++        # Also taken from **kwargs. Because the assigned
++        # arguments are the minimum parameters to run
++        # the iterative net. IMO.
++        self.lr_policy = kwargs.get("lr_policy", "fixed")
++        self.momentum = kwargs.get("momentum", 0.99)
++        self.beta1 = 1 - kwargs.get("beta1", 0.1)
++        self.beta2 = 1 - kwargs.get("beta2", 0.01)
++        self.rho = kwargs.get("rho", 0.95)
++        self.gamma = kwargs.get("gamma", 0.01)
++        self.power = kwargs.get("power", 1.0)
++        self.epoch_step = kwargs.get("epoch_step", 1)
++        # Add special iterative member
++        self._iterations = 0
++
++        # Empty features and shape
++        self.n_features = None
++        self.input_shape = None
++        self.m_issparse = False
++        self.m_isbinary = False
++        self.m_ismultilabel = False
++
++        # TODO: Should one add a try-except here?
++        self.num_units_per_layer = []
++        self.dropout_per_layer = []
++        self.activation_per_layer = []
++        self.weight_init_layer = []
++        self.std_per_layer = []
++        self.leakiness_per_layer = []
++        self.tanh_alpha_per_layer = []
++        self.tanh_beta_per_layer = []
++        for i in range(1, self.num_layers):
++            self.num_units_per_layer.append(int(kwargs.get("num_units_layer_" + str(i), 128)))
++            self.dropout_per_layer.append(float(kwargs.get("dropout_layer_" + str(i), 0.5)))
++            self.activation_per_layer.append(kwargs.get("activation_layer_" + str(i), 'relu'))
++            self.weight_init_layer.append(kwargs.get("weight_init_" + str(i), 'he_normal'))
++            self.std_per_layer.append(float(kwargs.get("std_layer_" + str(i), 0.005)))
++            self.leakiness_per_layer.append(float(kwargs.get("leakiness_layer_" + str(i), 1./3.)))
++            self.tanh_alpha_per_layer.append(float(kwargs.get("tanh_alpha_layer_" + str(i), 2./3.)))
++            self.tanh_beta_per_layer.append(float(kwargs.get("tanh_beta_layer_" + str(i), 1.7159)))
++        self.estimator = None
++        self.random_state = random_state
++
++    def _prefit(self, X, y):
++        self.batch_size = int(self.batch_size)
++        self.n_features = X.shape[1]
++        # cap batchsize to the number of data points if necessary
++        batch_size = np.min((self.batch_size, X.shape[0]))
++        self.input_shape = (batch_size, self.n_features)
++        print(self.input_shape)
++        assert len(self.num_units_per_layer) == self.num_layers - 1,\
++            "Number of created layers is different than actual layers"
++        assert len(self.dropout_per_layer) == self.num_layers - 1,\
++            "Number of created layers is different than actual layers"
++
++        # if len(y.shape) == 2 and y.shape[1] > 1:  # Multilabel
++        #     self.m_ismultilabel = True
++        #     self.num_output_units = y.shape[1]
++        # else:
++        #     number_classes = len(np.unique(y.astype(int)))
++        #     if number_classes == 2:  # Make it binary
++        #         self.m_isbinary = True
++        #         self.num_output_units = 1
++        #         if len(y.shape) == 1:
++        #             y = y[:, np.newaxis]
++        #     else:
++        #         self.num_output_units = number_classes
++        if len(y.shape) == 2:
++            self.num_output_units = y.shape[1]
++        else:
++            y = y[:, np.newaxis]
++            self.num_output_units = 1
++
++        self.m_issparse = sp.issparse(X)
++
++        return X, y
++
++    def fit(self, X, y, sample_weight=None):
++
++        Xf, yf = self._prefit(X, y)
++        while not self.configuration_fully_fitted():
++            self.iterative_fit(Xf, yf, n_iter=1, sample_weight=sample_weight)
++
++        return self
++
++    def iterative_fit(self, X, y, n_iter=1, refit=False, sample_weight=None):
++        Xf, yf = self._prefit(X, y)
++
++        if refit:
++            self.estimator = None
++
++        if self.estimator is None:
++            self._iterations = 1
++            from ...implementations import FeedForwardNet
++            self.estimator = FeedForwardNet.FeedForwardNet(batch_size=self.batch_size,
++                                                           input_shape=self.input_shape,
++                                                           num_layers=self.num_layers,
++                                                           num_units_per_layer=self.num_units_per_layer,
++                                                           dropout_per_layer=self.dropout_per_layer,
++                                                           activation_per_layer=self.activation_per_layer,
++                                                           weight_init_per_layer=self.weight_init_layer,
++                                                           std_per_layer=self.std_per_layer,
++                                                           leakiness_per_layer=self.leakiness_per_layer,
++                                                           tanh_alpha_per_layer=self.tanh_alpha_per_layer,
++                                                           tanh_beta_per_layer=self.tanh_beta_per_layer,
++                                                           num_output_units=self.num_output_units,
++                                                           dropout_output=self.dropout_output,
++                                                           learning_rate=self.learning_rate,
++                                                           lr_policy=self.lr_policy,
++                                                           lambda2=self.lambda2,
++                                                           momentum=self.momentum,
++                                                           beta1=self.beta1,
++                                                           beta2=self.beta2,
++                                                           rho=self.rho,
++                                                           solver=self.solver,
++                                                           num_epochs=1,
++                                                           gamma=self.gamma,
++                                                           power=self.power,
++                                                           epoch_step=self.epoch_step,
++                                                           is_sparse=self.m_issparse,
++                                                           is_binary=False,
++                                                           is_regression=True,
++                                                           is_multilabel=False,
++                                                           random_state=self.random_state)
++        self.estimator.num_epochs = n_iter
++        # print('Increasing epochs %d' % n_iter)
++        # print('Iterations: %d' % self._iterations)
++        self.estimator.fit(Xf, yf)
++
++        if self._iterations >= self.number_epochs:
++            self._fully_fit = True
++        self._iterations += n_iter
++        return self
++
++    def estimator_supports_iterative_fit(self):
++        return True
++
++    def configuration_fully_fitted(self):
++        if self.estimator is None:
++            return False
++        elif not hasattr(self, '_fully_fit'):
++            return False
++        else:
++            return self._fully_fit
++
++    def predict(self, X):
++        if self.estimator is None:
++            raise NotImplementedError
++        return self.estimator.predict(X, self.m_issparse)
++
++    def predict_proba(self, X):
++        if self.estimator is None:
++            raise NotImplementedError()
++        return self.estimator.predict_proba(X, self.m_issparse)
++
++    @staticmethod
++    def get_properties(dataset_properties=None):
++        return {'shortname': 'regression_feed_nn_iter',
++                'name': 'Regression Feed Forward Neural Network Iterative',
++                'handles_regression': True,
++                'handles_classification': False,
++                'handles_multiclass': False,
++                'handles_multilabel': False,
++                'is_deterministic': True,
++                'input': (DENSE, SPARSE, UNSIGNED_DATA),
++                'output': (PREDICTIONS,)}
++
++    @staticmethod
++    def get_hyperparameter_search_space(dataset_properties=None):
++        max_num_layers = 7  # Maximum number of layers coded
++
++        # Hacky way to condition layers params based on the number of layers
++        # 'c'=1, 'd'=2, 'e'=3 ,'f'=4', g ='5', h='6' + output_layer
++        layer_choices = [chr(i) for i in range(ord('c'), ord('b') + max_num_layers)]
++
++        batch_size = UniformIntegerHyperparameter("batch_size",
++                                                  32, 4096,
++                                                  log=True,
++                                                  default_value=32)
++
++        # number_epochs = UniformIntegerHyperparameter("number_epochs",
++        #                                              2, 80,
++        #                                              default_value=5)
++
++        num_layers = CategoricalHyperparameter("num_layers",
++                                               choices=layer_choices,
++                                               default_value='c')
++
++        lr = UniformFloatHyperparameter("learning_rate", 1e-6, 1.0,
++                                        log=True,
++                                        default_value=0.01)
++
++        l2 = UniformFloatHyperparameter("lambda2", 1e-7, 1e-2,
++                                        log=True,
++                                        default_value=1e-4)
++
++        dropout_output = UniformFloatHyperparameter("dropout_output",
++                                                    0.0, 0.99,
++                                                    default_value=0.5)
++
++        # Define basic hyperparameters and define the config space
++        # basic means that are independent from the number of layers
++
++        cs = ConfigurationSpace()
++        # cs.add_hyperparameter(number_epochs)
++        cs.add_hyperparameter(batch_size)
++        cs.add_hyperparameter(num_layers)
++        cs.add_hyperparameter(lr)
++        cs.add_hyperparameter(l2)
++        cs.add_hyperparameter(dropout_output)
++
++        #  Define parameters with different child parameters and conditions
++        solver_choices = ["adam", "adadelta", "adagrad",
++                          "sgd", "momentum", "nesterov",
++                          "smorm3s"]
++
++        solver = CategoricalHyperparameter(name="solver",
++                                           choices=solver_choices,
++                                           default_value="smorm3s")
++
++        beta1 = UniformFloatHyperparameter("beta1", 1e-4, 0.1,
++                                           log=True,
++                                           default_value=0.1)
++
++        beta2 = UniformFloatHyperparameter("beta2", 1e-4, 0.1,
++                                           log=True,
++                                           default_value=0.01)
++
++        rho = UniformFloatHyperparameter("rho", 0.05, 0.99,
++                                         log=True,
++                                         default_value=0.95)
++
++        momentum = UniformFloatHyperparameter("momentum", 0.3, 0.999,
++                                              default_value=0.9)
++
++        # TODO: Add policy based on this sklearn sgd
++        policy_choices = ['fixed', 'inv', 'exp', 'step']
++
++        lr_policy = CategoricalHyperparameter(name="lr_policy",
++                                              choices=policy_choices,
++                                              default_value='fixed')
++
++        gamma = UniformFloatHyperparameter(name="gamma",
++                                           lower=1e-1, upper=1e0,
++                                           default_value=1e-1,
++                                           log=True)
++
++        power = UniformFloatHyperparameter("power",
++                                           0.0, 1.0,
++                                           default_value=0.5)
++
++        epoch_step = UniformIntegerHyperparameter("epoch_step",
++                                                  5, 50,
++                                                  default_value=5)
++
++        cs.add_hyperparameter(solver)
++        cs.add_hyperparameter(beta1)
++        cs.add_hyperparameter(beta2)
++        cs.add_hyperparameter(momentum)
++        cs.add_hyperparameter(rho)
++        cs.add_hyperparameter(lr_policy)
++        cs.add_hyperparameter(gamma)
++        cs.add_hyperparameter(power)
++        cs.add_hyperparameter(epoch_step)
++
++        # Define parameters that are needed it for each layer
++        output_activation_choices = ['softmax', 'sigmoid', 'softplus', 'tanh']
++
++        activations_choices = ['sigmoid', 'tanh', 'scaledTanh', 'elu', 'relu', 'leaky', 'linear']
++
++        weight_choices = ['constant', 'normal', 'uniform',
++                          'glorot_normal', 'glorot_uniform',
++                          'he_normal', 'he_uniform',
++                          'ortogonal', 'sparse']
++
++        # Iterate over parameters that are used in each layer
++        for i in range(1, max_num_layers):
++            layer_units = UniformIntegerHyperparameter("num_units_layer_" + str(i),
++                                                       64, 1024,
++                                                       log=True,
++                                                       default_value=128)
++            cs.add_hyperparameter(layer_units)
++            layer_dropout = UniformFloatHyperparameter("dropout_layer_" + str(i),
++                                                       0.0, 0.99,
++                                                       default_value=0.5)
++            cs.add_hyperparameter(layer_dropout)
++            weight_initialization = CategoricalHyperparameter('weight_init_' + str(i),
++                                                              choices=weight_choices,
++                                                              default_value='he_normal')
++            cs.add_hyperparameter(weight_initialization)
++            layer_std = UniformFloatHyperparameter("std_layer_" + str(i),
++                                                   1e-6, 0.1,
++                                                   log=True,
++                                                   default_value=0.005)
++            cs.add_hyperparameter(layer_std)
++            layer_activation = CategoricalHyperparameter("activation_layer_" + str(i),
++                                                         choices=activations_choices,
++                                                         default_value="relu")
++            cs.add_hyperparameter(layer_activation)
++            # layer_leakiness = UniformFloatHyperparameter('leakiness_layer_' + str(i),
++            #                                              0.01, 0.99,
++            #                                              default_value=0.3)
++            #
++            # cs.add_hyperparameter(layer_leakiness)
++            # layer_tanh_alpha = UniformFloatHyperparameter('tanh_alpha_layer_' + str(i),
++            #                                               0.5, 1.0,
++            #                                               default_value=2. / 3.)
++            # cs.add_hyperparameter(layer_tanh_alpha)
++            # layer_tanh_beta = UniformFloatHyperparameter('tanh_beta_layer_' + str(i),
++            #                                              1.1, 3.0,
++            #                                              log=True,
++            #                                              default_value=1.7159)
++            # cs.add_hyperparameter(layer_tanh_beta)
++
++        # TODO: Could be in a function in a new module
++        for i in range(2, max_num_layers):
++            # Condition layers parameter on layer choice
++            layer_unit_param = cs.get_hyperparameter("num_units_layer_" + str(i))
++            layer_cond = InCondition(child=layer_unit_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i - 1:]])
++            cs.add_condition(layer_cond)
++            # Condition dropout parameter on layer choice
++            layer_dropout_param = cs.get_hyperparameter("dropout_layer_" + str(i))
++            layer_cond = InCondition(child=layer_dropout_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i - 1:]])
++            cs.add_condition(layer_cond)
++            # Condition weight initialization on layer choice
++            layer_weight_param = cs.get_hyperparameter("weight_init_" + str(i))
++            layer_cond = InCondition(child=layer_weight_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i - 1:]])
++            cs.add_condition(layer_cond)
++            # Condition std parameter on weight layer initialization choice
++            layer_std_param = cs.get_hyperparameter("std_layer_" + str(i))
++            weight_cond = EqualsCondition(child=layer_std_param,
++                                          parent=layer_weight_param,
++                                          value='normal')
++            cs.add_condition(weight_cond)
++            # Condition activation parameter on layer choice
++            layer_activation_param = cs.get_hyperparameter("activation_layer_" + str(i))
++            layer_cond = InCondition(child=layer_activation_param, parent=num_layers,
++                                     values=[l for l in layer_choices[i - 1:]])
++            cs.add_condition(layer_cond)
++            # # Condition leakiness on activation choice
++            # layer_leakiness_param = cs.get_hyperparameter("leakiness_layer_" + str(i))
++            # activation_cond = EqualsCondition(child=layer_leakiness_param,
++            #                                   parent=layer_activation_param,
++            #                                   value='leaky')
++            # cs.add_condition(activation_cond)
++            # # Condition tanh on activation choice
++            # layer_tanh_alpha_param = cs.get_hyperparameter("tanh_alpha_layer_" + str(i))
++            # activation_cond = EqualsCondition(child=layer_tanh_alpha_param,
++            #                                   parent=layer_activation_param,
++            #                                   value='scaledTanh')
++            # cs.add_condition(activation_cond)
++            # layer_tanh_beta_param = cs.get_hyperparameter("tanh_beta_layer_" + str(i))
++            # activation_cond = EqualsCondition(child=layer_tanh_beta_param,
++            #                                   parent=layer_activation_param,
++            #                                   value='scaledTanh')
++            # cs.add_condition(activation_cond)
++
++        # Conditioning on solver
++        momentum_depends_on_solver = InCondition(momentum, solver,
++                                                 values=["momentum", "nesterov"])
++        beta1_depends_on_solver = EqualsCondition(beta1, solver, "adam")
++        beta2_depends_on_solver = EqualsCondition(beta2, solver, "adam")
++        rho_depends_on_solver = EqualsCondition(rho, solver, "adadelta")
++
++        cs.add_condition(momentum_depends_on_solver)
++        cs.add_condition(beta1_depends_on_solver)
++        cs.add_condition(beta2_depends_on_solver)
++        cs.add_condition(rho_depends_on_solver)
++
++        # Conditioning on learning rate policy
++        lr_policy_depends_on_solver = InCondition(lr_policy, solver,
++                                                  ["adadelta", "adagrad", "sgd",
++                                                   "momentum", "nesterov"])
++        gamma_depends_on_policy = InCondition(child=gamma, parent=lr_policy,
++                                              values=["inv", "exp", "step"])
++        power_depends_on_policy = EqualsCondition(power, lr_policy, "inv")
++        epoch_step_depends_on_policy = EqualsCondition(epoch_step, lr_policy, "step")
++
++        cs.add_condition(lr_policy_depends_on_solver)
++        cs.add_condition(gamma_depends_on_policy)
++        cs.add_condition(power_depends_on_policy)
++        cs.add_condition(epoch_step_depends_on_policy)
++
++        return cs
+diff --git a/autosklearn/pipeline/implementations/FeedForwardNet.py b/autosklearn/pipeline/implementations/FeedForwardNet.py
+new file mode 100644
+index 00000000..5e556679
+--- /dev/null
++++ b/autosklearn/pipeline/implementations/FeedForwardNet.py
+@@ -0,0 +1,373 @@
++"""
++Created on Jul 22, 2015
++Modified on Apr 21, 2016
++
++@author: Aaron Klein
++@modified: Hector Mendoza
++"""
++import numpy as np
++from sklearn.utils.validation import check_random_state
++import theano
++import theano.tensor as T
++import theano.sparse as S
++import lasagne
++
++DEBUG = True
++
++
++def sharedX(X, dtype=theano.config.floatX, name=None, broadcastable=None):
++    if broadcastable:
++        return theano.shared(np.asarray(X, dtype=dtype), name=name, broadcastable=broadcastable)
++    else:
++        return theano.shared(np.asarray(X, dtype=dtype), name=name)
++
++
++def smorm3s(cost, params, learning_rate=1e-3, eps=1e-16, gather=False):
++    updates = []
++    optim_params = []
++    grads = T.grad(cost, params)
++
++    for p, grad in zip(params, grads):
++        mem = sharedX(p.get_value() * 0. + 1., broadcastable=p.broadcastable)
++        g = sharedX(p.get_value() * 0., broadcastable=p.broadcastable)
++        g2 = sharedX(p.get_value() * 0., broadcastable=p.broadcastable)
++        if gather:
++            optim_params.append(mem)
++            optim_params.append(g)
++            optim_params.append(g2)
++
++        r_t = 1. / (mem + 1)
++        g_t = (1 - r_t) * g + r_t * grad
++        g2_t = (1 - r_t) * g2 + r_t * grad**2
++        p_t = p - grad * T.minimum(learning_rate, g_t * g_t / (g2_t + eps)) / \
++                  (T.sqrt(g2_t + eps) + eps)
++        mem_t = 1 + mem * (1 - g_t * g_t / (g2_t + eps))
++
++        updates.append((g, g_t))
++        updates.append((g2, g2_t))
++        updates.append((p, p_t))
++        updates.append((mem, mem_t))
++
++    return updates
++
++
++def iterate_minibatches(inputs, targets, batchsize, shuffle=False, random_state=None):
++    assert inputs.shape[0] == targets.shape[0],\
++           "The number of training points is not the same"
++    if shuffle:
++        seed = check_random_state(random_state)
++        indices = np.arange(inputs.shape[0])
++        seed.shuffle(indices)
++        # np.random.shuffle(indices)
++    for start_idx in range(0, inputs.shape[0] - batchsize + 1, batchsize):
++        if shuffle:
++            excerpt = indices[start_idx:start_idx + batchsize]
++        else:
++            excerpt = slice(start_idx, start_idx + batchsize)
++        yield inputs[excerpt], targets[excerpt]
++
++
++class FeedForwardNet(object):
++    def __init__(self, input_shape=(100, 28*28), random_state=None,
++                 batch_size=100, num_layers=4, num_units_per_layer=(10, 10, 10),
++                 dropout_per_layer=(0.5, 0.5, 0.5), std_per_layer=(0.005, 0.005, 0.005),
++                 num_output_units=2, dropout_output=0.5, learning_rate=0.01,
++                 lambda2=1e-4, momentum=0.9, beta1=0.9, beta2=0.9,
++                 rho=0.95, solver='adam', num_epochs=2,
++                 lr_policy='fixed', gamma=0.01, power=1.0, epoch_step=1,
++                 activation_per_layer=('relu',)*3, weight_init_per_layer=('henormal',)*3,
++                 leakiness_per_layer=(1./3.,)*3, tanh_alpha_per_layer=(2./3.,)*3,
++                 tanh_beta_per_layer=(1.7159,)*3,
++                 is_sparse=False, is_binary=False, is_regression=False, is_multilabel=False):
++
++        self.random_state = random_state
++        self.batch_size = batch_size
++        self.input_shape = input_shape
++        self.num_layers = num_layers
++        self.num_units_per_layer = num_units_per_layer
++        self.dropout_per_layer = np.asarray(dropout_per_layer, dtype=theano.config.floatX)
++        self.num_output_units = num_output_units
++        self.dropout_output = T.cast(dropout_output, dtype=theano.config.floatX)
++        self.activation_per_layer = activation_per_layer
++        self.weight_init_per_layer = weight_init_per_layer
++        self.std_per_layer = np.asarray(std_per_layer, dtype=theano.config.floatX)
++        self.leakiness_per_layer = np.asarray(leakiness_per_layer, dtype=theano.config.floatX)
++        self.tanh_alpha_per_layer = np.asarray(tanh_alpha_per_layer, dtype=theano.config.floatX)
++        self.tanh_beta_per_layer = np.asarray(tanh_beta_per_layer, dtype=theano.config.floatX)
++        self.momentum = T.cast(momentum, dtype=theano.config.floatX)
++
++        self.init_learning_rate = np.asarray(learning_rate, dtype=theano.config.floatX)
++        self.learning_rate = np.asarray(learning_rate, dtype=theano.config.floatX)
++        self.lambda2 = T.cast(lambda2, dtype=theano.config.floatX)
++        self.beta1 = T.cast(beta1, dtype=theano.config.floatX)
++        self.beta2 = T.cast(beta2, dtype=theano.config.floatX)
++        self.rho = T.cast(rho, dtype=theano.config.floatX)
++        self.num_epochs = num_epochs
++        self.lr_policy = lr_policy
++        self.gamma = np.asarray(gamma, dtype=theano.config.floatX)
++        self.power = np.asarray(power, dtype=theano.config.floatX)
++        self.epoch_step = np.asarray(epoch_step, dtype=theano.config.floatX)
++        self.is_binary = is_binary
++        self.is_regression = is_regression
++        self.is_multilabel = is_multilabel
++        self.is_sparse = is_sparse
++        self.solver = solver
++
++        if is_sparse:
++            #input_var = S.csr_matrix('inputs', dtype=theano.config.floatX)
++            input_var = T.matrix('inputs')
++        else:
++            input_var = T.matrix('inputs')
++
++        if self.is_binary or self.is_multilabel or self.is_regression:
++            target_var = T.matrix('targets')
++        else:
++            target_var = T.ivector('targets')
++
++        if DEBUG:
++            if self.is_binary:
++                print("... using binary loss")
++            if self.is_multilabel:
++                print("... using multilabel prediction")
++            if self.is_regression:
++                print("... using regression loss")
++            print("... building network!")
++            print("Input shape:", input_shape)
++            print("... with number of epochs:")
++            print(num_epochs)
++
++        # Added for reproducibility
++        seed = check_random_state(self.random_state)
++        lasagne.random.set_rng(seed)
++
++        self.network = lasagne.layers.InputLayer(shape=input_shape,
++                                                 input_var=input_var)
++
++        # Define each layer
++        for i in range(num_layers - 1):
++            init_weight = self._choose_weight_init(i)
++            activation_function = self._choose_activation(i)
++            self.network = lasagne.layers.DenseLayer(
++                 lasagne.layers.dropout(self.network,
++                                        p=self.dropout_per_layer[i]),
++                 num_units=self.num_units_per_layer[i],
++                 W=init_weight,
++                 b=lasagne.init.Constant(val=0.0),
++                 nonlinearity=activation_function)
++
++        # Define output layer and nonlinearity of last layer
++        if self.is_regression:
++            output_activation = lasagne.nonlinearities.linear
++        elif self.is_binary or self.is_multilabel:
++            output_activation = lasagne.nonlinearities.sigmoid
++        else:
++            output_activation = lasagne.nonlinearities.softmax
++
++        self.network = lasagne.layers.DenseLayer(
++                 lasagne.layers.dropout(self.network,
++                                        p=self.dropout_output),
++                 num_units=self.num_output_units,
++                 W=lasagne.init.GlorotNormal(),
++                 b=lasagne.init.Constant(),
++                 nonlinearity=output_activation)
++
++        prediction = lasagne.layers.get_output(self.network)
++
++        if self.is_regression:
++            loss_function = lasagne.objectives.squared_error
++        elif self.is_binary or self.is_multilabel:
++            loss_function = lasagne.objectives.binary_crossentropy
++        else:
++            loss_function = lasagne.objectives.categorical_crossentropy
++
++        loss = loss_function(prediction, target_var)
++
++        # Aggregate loss mean function with l2
++        # Regularization on all layers' params
++        if self.is_binary or self.is_multilabel:
++            #loss = T.sum(loss, dtype=theano.config.floatX)
++            loss = T.mean(loss, dtype=theano.config.floatX)
++        else:
++            loss = T.mean(loss, dtype=theano.config.floatX)
++        l2_penalty = self.lambda2 * lasagne.regularization.regularize_network_params(
++            self.network, lasagne.regularization.l2)
++        loss += l2_penalty
++        params = lasagne.layers.get_all_params(self.network, trainable=True)
++
++        # Create the symbolic scalar lr for loss & updates function
++        lr_scalar = T.scalar('lr', dtype=theano.config.floatX)
++
++        if solver == "nesterov":
++            updates = lasagne.updates.nesterov_momentum(loss, params,
++                                                        learning_rate=lr_scalar,
++                                                        momentum=self.momentum)
++        elif solver == "adam":
++            updates = lasagne.updates.adam(loss, params,
++                                           learning_rate=lr_scalar,
++                                           beta1=self.beta1, beta2=self.beta2)
++        elif solver == "adadelta":
++            updates = lasagne.updates.adadelta(loss, params,
++                                               learning_rate=lr_scalar,
++                                               rho=self.rho)
++        elif solver == "adagrad":
++            updates = lasagne.updates.adagrad(loss, params,
++                                              learning_rate=lr_scalar)
++        elif solver == "sgd":
++            updates = lasagne.updates.sgd(loss, params,
++                                          learning_rate=lr_scalar)
++        elif solver == "momentum":
++            updates = lasagne.updates.momentum(loss, params,
++                                               learning_rate=lr_scalar,
++                                               momentum=self.momentum)
++        elif solver == "smorm3s":
++            updates = smorm3s(loss, params,
++                              learning_rate=lr_scalar)
++        else:
++            updates = lasagne.updates.sgd(loss, params,
++                                          learning_rate=lr_scalar)
++
++        # Validation was removed, as auto-sklearn handles that, if this net
++        # is to be used independently, validation accuracy has to be included
++        if DEBUG:
++            print("... compiling theano functions")
++        self.train_fn = theano.function([input_var, target_var, lr_scalar],
++                                        loss,
++                                        updates=updates,
++                                        allow_input_downcast=True,
++                                        profile=False,
++                                        on_unused_input='warn',
++                                        name='train_fn')
++        if DEBUG:
++            print('... compiling update function')
++        self.update_function = self._policy_function()
++
++    def _policy_function(self):
++        epoch, gm, powr, step = T.scalars('epoch', 'gm', 'powr', 'step')
++        if self.lr_policy == 'inv':
++            decay = T.power(1.0+gm*epoch, -powr)
++        elif self.lr_policy == 'exp':
++            decay = gm ** epoch
++        elif self.lr_policy == 'step':
++            decay = T.switch(T.eq(T.mod_check(epoch, step), 0.0),
++                             T.power(gm, T.floor_div(epoch, step)),
++                             1.0)
++        else:
++            decay = T.constant(1.0, name='fixed', dtype=theano.config.floatX)
++
++        return theano.function([gm, epoch, powr, step],
++                               decay,
++                               allow_input_downcast=True,
++                               on_unused_input='ignore',
++                               name='update_fn')
++
++    def fit(self, X, y):
++        if self.batch_size > X.shape[0]:
++            self.batch_size = X.shape[0]
++            print('One update per epoch batch size')
++
++        if self.is_sparse:
++            X = X.astype(np.float32)
++        else:
++            try:
++                X = np.asarray(X, dtype=theano.config.floatX)
++                y = np.asarray(y, dtype=theano.config.floatX)
++            except Exception as E:
++                print('Fit casting error: %s' % E)
++
++        for epoch in range(self.num_epochs):
++            train_err = 0
++            train_batches = 0
++            for inputs, targets in iterate_minibatches(X, y, self.batch_size, shuffle=True,
++                                                       random_state=self.random_state):
++                if self.is_sparse:
++                    inputs = inputs.toarray()
++                train_err += self.train_fn(inputs, targets, self.learning_rate)
++                train_batches += 1
++            decay = self.update_function(self.gamma, epoch+1.0,
++                                         self.power, self.epoch_step)
++            self.learning_rate = self.init_learning_rate * decay
++            print("  training loss:\t\t{:.6f}".format(train_err / train_batches))
++        return self
++
++    def predict(self, X, is_sparse=False):
++        predictions = self.predict_proba(X, is_sparse)
++        if self.is_multilabel:
++            return np.round(predictions)
++        elif self.is_regression:
++            return predictions
++        else:
++            return np.argmax(predictions, axis=1)
++
++    def predict_proba(self, X, is_sparse=False):
++        if is_sparse:
++            #X = X.astype(np.float32)
++            #X = S.as_sparse_or_tensor_variable(X)
++            X = X.toarray()
++        else:
++            try:
++                X = np.asarray(X, dtype=theano.config.floatX)
++            except Exception as E:
++                print('Prediction casting error: %s' % E)
++
++        predictions = lasagne.layers.get_output(self.network,
++                                                X, deterministic=True).eval()
++        if self.is_binary:
++            return np.append(1.0 - predictions, predictions, axis=1)
++        else:
++            return predictions
++
++    def _choose_activation(self, index=0, output=False):
++        if output:
++            nl = getattr(self, 'output_activations', None)
++        else:
++            nl = getattr(self, 'activation_functions', None)
++
++        activation = self.activation_per_layer[index]
++        layer_activation = nl.get(activation)
++        if activation == 'scaledTanh':
++            layer_activation = layer_activation(scale_in=self.tanh_alpha_per_layer[index],
++                                                scale_out=self.tanh_beta_per_layer[index])
++        elif activation == 'leaky':
++            layer_activation = layer_activation(leakiness=self.leakiness_per_layer[index])
++
++        return layer_activation
++
++    def _choose_weight_init(self, index=0, output=False):
++        wi = getattr(self, 'weight_initializations', None)
++        initialization = self.weight_init_per_layer[index]
++        weight_init = wi.get(initialization)
++        if initialization == 'normal':
++            weight_init = weight_init(std=self.std_per_layer[index])
++        else:
++            weight_init = weight_init()
++
++        return weight_init
++
++    activation_functions = {
++        'relu': lasagne.nonlinearities.rectify,
++        'leaky': lasagne.nonlinearities.LeakyRectify,
++        'very_leaky': lasagne.nonlinearities.very_leaky_rectify,
++        'elu': lasagne.nonlinearities.elu,
++        'linear': lasagne.nonlinearities.linear,
++        'scaledTanh': lasagne.nonlinearities.ScaledTanH,
++        'sigmoid': lasagne.nonlinearities.sigmoid,
++        'tahn': lasagne.nonlinearities.tanh,
++    }
++    output_activations = {
++        'softmax': lasagne.nonlinearities.softmax,
++        'softplus': lasagne.nonlinearities.softplus,
++        'sigmoid': lasagne.nonlinearities.sigmoid,
++        'tahn': lasagne.nonlinearities.tanh,
++    }
++    weight_initializations = {
++        'constant': lasagne.init.Constant,
++        'normal': lasagne.init.Normal,
++        'uniform': lasagne.init.Uniform,
++        'glorot_normal': lasagne.init.GlorotNormal,
++        'glorot_uniform': lasagne.init.GlorotUniform,
++        'he_normal': lasagne.init.HeNormal,
++        'he_uniform': lasagne.init.HeUniform,
++        'ortogonal': lasagne.init.Orthogonal,
++        'sparse': lasagne.init.Sparse
++    }
++
+diff --git a/autosklearn/pipeline/util.py b/autosklearn/pipeline/util.py
+index f2055343..4ba1b301 100644
+--- a/autosklearn/pipeline/util.py
++++ b/autosklearn/pipeline/util.py
+@@ -162,7 +162,7 @@ def _test_classifier_predict_proba(classifier, dataset='iris', sparse=False,
+     default = configuration_space.get_default_configuration()
+     classifier = classifier(random_state=np.random.RandomState(1),
+                             **{hp_name: default[hp_name] for hp_name in
+-                               default})
++                               default if default[hp_name] is not None})
+     predictor = classifier.fit(X_train, Y_train)
+     predictions = predictor.predict_proba(X_test)
+     return predictions, Y_test
+@@ -195,7 +195,7 @@ class PreprocessingTestCase(unittest.TestCase):
+         default = configuration_space.get_default_configuration()
+         preprocessor = Preprocessor(random_state=np.random.RandomState(1),
+                                     **{hp_name: default[hp_name] for hp_name in
+-                                       default})
++                                       default if default[hp_name] is not None})
+         preprocessor.fit(X_train, Y_train)
+         Xt = preprocessor.transform(X_train)
+         #self.assertEqual(Xt.dtype, np.float32)
+@@ -207,7 +207,7 @@ class PreprocessingTestCase(unittest.TestCase):
+         default = configuration_space.get_default_configuration()
+         preprocessor = Preprocessor(random_state=np.random.RandomState(1),
+                                     **{hp_name: default[hp_name] for hp_name in
+-                                       default})
++                                       default if default[hp_name] is not None})
+         preprocessor.fit(X_train, Y_train)
+         Xt = preprocessor.transform(X_train)
+         #self.assertEqual(Xt.dtype, np.float64)
+@@ -222,7 +222,7 @@ class PreprocessingTestCase(unittest.TestCase):
+             default = configuration_space.get_default_configuration()
+             preprocessor = Preprocessor(random_state=np.random.RandomState(1),
+                                         **{hp_name: default[hp_name] for hp_name
+-                                           in default})
++                                           in default if default[hp_name] is not None})
+             preprocessor.fit(X_train, Y_train)
+             Xt = preprocessor.transform(X_train)
+             #self.assertEqual(Xt.dtype, np.float32)
+@@ -236,7 +236,7 @@ class PreprocessingTestCase(unittest.TestCase):
+             default = configuration_space.get_default_configuration()
+             preprocessor = Preprocessor(random_state=np.random.RandomState(1),
+                                         **{hp_name: default[hp_name] for hp_name
+-                                           in default})
++                                           in default if default[hp_name] is not None})
+             preprocessor.fit(X_train, Y_train)
+             Xt = preprocessor.transform(X_train)
+             #self.assertEqual(Xt.dtype, np.float64)
+@@ -249,7 +249,7 @@ def _test_regressor(Regressor, dataset='diabetes', sparse=False):
+     default = configuration_space.get_default_configuration()
+     regressor = Regressor(random_state=np.random.RandomState(1),
+                           **{hp_name: default[hp_name] for hp_name in
+-                             default})
++                             default if default[hp_name] is not None})
+     # Dumb incomplete hacky test to check that we do not alter the data
+     X_train_hash = hash(str(X_train))
+     X_test_hash = hash(str(X_test))
+@@ -290,7 +290,7 @@ def _test_regressor_iterative_fit(Regressor, dataset='diabetes', sparse=False):
+     default = configuration_space.get_default_configuration()
+     regressor = Regressor(random_state=np.random.RandomState(1),
+                           **{hp_name: default[hp_name] for hp_name in
+-                             default})
++                             default if default[hp_name] is not None})
+     while not regressor.configuration_fully_fitted():
+         regressor = regressor.iterative_fit(X_train, Y_train)
+     predictions = regressor.predict(X_test)
+diff --git a/test/test_pipeline/components/classification/test_deepfeednet.py b/test/test_pipeline/components/classification/test_deepfeednet.py
+new file mode 100644
+index 00000000..cfe46ac2
+--- /dev/null
++++ b/test/test_pipeline/components/classification/test_deepfeednet.py
+@@ -0,0 +1,61 @@
++import unittest
++
++from autosklearn.pipeline.components.classification.DeepFeedNet import \
++    DeepFeedNet
++from autosklearn.pipeline.util import _test_classifier, \
++    _test_classifier_iterative_fit, _test_classifier_predict_proba
++
++import sklearn.metrics
++import sklearn.ensemble
++
++
++class DeepNetIterativeComponentTest(unittest.TestCase):
++    def test_default_configuration(self):
++        for i in range(2):
++            predictions, targets, _ = \
++                _test_classifier(DeepFeedNet)
++            self.assertAlmostEqual(0.57999999999999996,
++                                   sklearn.metrics.accuracy_score(targets,
++                                                                  predictions))
++
++    def test_default_configuration_predict_proba(self):
++        for i in range(2):
++            predictions, targets = \
++                _test_classifier_predict_proba(DeepFeedNet)
++            self.assertAlmostEqual(0.76018262995220975,
++                                   sklearn.metrics.log_loss(
++                                       targets, predictions))
++
++    def test_default_configuration_sparse(self):
++        for i in range(2):
++            predictions, targets, _ = \
++                _test_classifier(DeepFeedNet, sparse=True)
++            self.assertAlmostEqual(0.38,
++                                   sklearn.metrics.accuracy_score(targets,
++                                                                  predictions))
++
++    def test_default_configuration_binary(self):
++        for i in range(2):
++            predictions, targets, _ = \
++                _test_classifier(DeepFeedNet, make_binary=True)
++            self.assertAlmostEqual(0.95999999999999996,
++                                   sklearn.metrics.accuracy_score(targets,
++                                                                  predictions))
++
++    def test_default_configuration_multilabel(self):
++        for i in range(2):
++            predictions, targets, _ = \
++                _test_classifier(DeepFeedNet, make_multilabel=True)
++            self.assertAlmostEqual(0.4272222222222222,
++                                   sklearn.metrics.average_precision_score(
++                                       targets, predictions))
++
++    def test_default_configuration_predict_proba_multilabel(self):
++        for i in range(2):
++            predictions, targets = \
++                _test_classifier_predict_proba(DeepFeedNet,
++                                               make_multilabel=True)
++            self.assertEqual(predictions.shape, ((50, 3)))
++            self.assertAlmostEqual(0.7734255011312327,
++                                   sklearn.metrics.average_precision_score(
++                                       targets, predictions))
+diff --git a/test/test_pipeline/components/classification/test_deepnetiterative.py b/test/test_pipeline/components/classification/test_deepnetiterative.py
+new file mode 100644
+index 00000000..998d0051
+--- /dev/null
++++ b/test/test_pipeline/components/classification/test_deepnetiterative.py
+@@ -0,0 +1,69 @@
++import unittest
++
++from autosklearn.pipeline.components.classification.DeepNetIterative import \
++    DeepNetIterative
++from autosklearn.pipeline.util import _test_classifier, \
++    _test_classifier_iterative_fit, _test_classifier_predict_proba
++
++import sklearn.metrics
++import sklearn.ensemble
++
++
++class DeepNetIterativeComponentTest(unittest.TestCase):
++    def test_default_configuration(self):
++        for i in range(2):
++            predictions, targets, _ = \
++                _test_classifier(DeepNetIterative)
++            self.assertAlmostEqual(0.58,
++                                   sklearn.metrics.accuracy_score(targets,
++                                                                  predictions))
++
++    def test_default_configuration_predict_proba(self):
++        for i in range(2):
++            predictions, targets = \
++                _test_classifier_predict_proba(DeepNetIterative)
++            self.assertAlmostEqual(0.76018262995220975,
++                                   sklearn.metrics.log_loss(
++                                       targets, predictions))
++
++    def test_default_configuration_sparse(self):
++        for i in range(2):
++            predictions, targets, _ = \
++                _test_classifier(DeepNetIterative, sparse=True)
++            self.assertAlmostEqual(0.38,
++                                   sklearn.metrics.accuracy_score(targets,
++                                                                  predictions))
++
++    def test_default_configuration_iterative_fit(self):
++        for i in range(2):
++            predictions, targets, _ = \
++                _test_classifier_iterative_fit(DeepNetIterative)
++            self.assertAlmostEqual(0.58,
++                                   sklearn.metrics.accuracy_score(targets,
++                                                                  predictions))
++
++    def test_default_configuration_binary(self):
++        for i in range(2):
++            predictions, targets, _ = \
++                _test_classifier(DeepNetIterative, make_binary=True)
++            self.assertAlmostEqual(0.9599999999999,
++                                   sklearn.metrics.accuracy_score(targets,
++                                                                  predictions))
++
++    def test_default_configuration_multilabel(self):
++        for i in range(2):
++            predictions, targets, _ = \
++                _test_classifier(DeepNetIterative, make_multilabel=True)
++            self.assertAlmostEqual(0.4272222222222222,
++                                   sklearn.metrics.average_precision_score(
++                                       targets, predictions))
++
++    def test_default_configuration_predict_proba_multilabel(self):
++        for i in range(2):
++            predictions, targets = \
++                _test_classifier_predict_proba(DeepNetIterative,
++                                               make_multilabel=True)
++            self.assertEqual(predictions.shape, ((50, 3)))
++            self.assertAlmostEqual(0.7734255011312327,
++                                   sklearn.metrics.average_precision_score(
++                                       targets, predictions))
+diff --git a/test/test_pipeline/components/feature_preprocessing/test_choice.py b/test/test_pipeline/components/feature_preprocessing/test_choice.py
+index 838cb5c3..246c113c 100644
+--- a/test/test_pipeline/components/feature_preprocessing/test_choice.py
++++ b/test/test_pipeline/components/feature_preprocessing/test_choice.py
+@@ -6,8 +6,8 @@ import autosklearn.pipeline.components.feature_preprocessing as fp
+ class FeatureProcessingTest(unittest.TestCase):
+     def test_get_available_components(self):
+         # Target type
+-        for target_type, num_values in [('classification', 15),
+-                                        ('regression', 13)]:
++        for target_type, num_values in [('classification', 16),
++                                        ('regression', 14)]:
+             data_properties = {'target_type': target_type}
+ 
+             available_components = fp.FeaturePreprocessorChoice(data_properties)\
+@@ -21,7 +21,7 @@ class FeatureProcessingTest(unittest.TestCase):
+         available_components = fp.FeaturePreprocessorChoice(data_properties) \
+             .get_available_components(data_properties)
+ 
+-        self.assertEqual(len(available_components), 15)
++        self.assertEqual(len(available_components), 16)
+ 
+         # Multilabel
+         data_properties = {'target_type': 'classification',
+@@ -29,4 +29,4 @@ class FeatureProcessingTest(unittest.TestCase):
+         available_components = fp.FeaturePreprocessorChoice(data_properties) \
+             .get_available_components(data_properties)
+ 
+-        self.assertEqual(len(available_components), 12)
++        self.assertEqual(len(available_components), 13)
+diff --git a/test/test_pipeline/components/feature_preprocessing/test_gaussian_random_projection.py b/test/test_pipeline/components/feature_preprocessing/test_gaussian_random_projection.py
+new file mode 100644
+index 00000000..507cc864
+--- /dev/null
++++ b/test/test_pipeline/components/feature_preprocessing/test_gaussian_random_projection.py
+@@ -0,0 +1,29 @@
++import unittest
++
++import numpy as np
++from sklearn.datasets import make_classification
++
++from autosklearn.pipeline.components.feature_preprocessing.gaussian_random_projection import \
++    GaussRandomProjection
++
++
++class GaussianRandomProjectionComponentTest(unittest.TestCase):
++    def test_default_configuration(self):
++        X_train, Y_train = make_classification(n_samples=1000, n_classes=2,
++                                               n_features=1000)
++
++        original_X_train = X_train.copy()
++        configuration_space = GaussRandomProjection.get_hyperparameter_search_space()
++        default = configuration_space.get_default_configuration()
++
++        preprocessor = GaussRandomProjection(
++            random_state=np.random.RandomState(1),
++            **{hp_name: default[hp_name] for hp_name in
++               default if default[hp_name] is not None})
++
++        transformer = preprocessor.fit(X_train, Y_train)
++        transformation, original = transformer.transform(X_train), original_X_train
++
++        self.assertEqual(transformation.shape[0], original.shape[0])
++        self.assertEqual(transformation.shape[1], 331)
++        self.assertFalse((transformation == 0).all())
+diff --git a/test/test_pipeline/components/regression/test_RegDeepNet.py b/test/test_pipeline/components/regression/test_RegDeepNet.py
+new file mode 100644
+index 00000000..24d0f9ac
+--- /dev/null
++++ b/test/test_pipeline/components/regression/test_RegDeepNet.py
+@@ -0,0 +1,18 @@
++import unittest
++
++from autosklearn.pipeline.components.regression.RegDeepNet import \
++    RegDeepNet
++from autosklearn.pipeline.util import _test_regressor, \
++    _test_regressor_iterative_fit
++
++import sklearn.metrics
++
++
++class RegDeepNetComponentTest(unittest.TestCase):
++    def test_default_configuration(self):
++        for i in range(2):
++            predictions, targets, _ = _test_regressor(RegDeepNet)
++            self.assertAlmostEqual(0.39563713703628156,
++                                   sklearn.metrics.r2_score(y_true=targets,
++                                                            y_pred=predictions),
++                                   places=2)
+diff --git a/test/test_pipeline/components/regression/test_RegDeepNetIterative.py b/test/test_pipeline/components/regression/test_RegDeepNetIterative.py
+new file mode 100644
+index 00000000..fd71c064
+--- /dev/null
++++ b/test/test_pipeline/components/regression/test_RegDeepNetIterative.py
+@@ -0,0 +1,25 @@
++import unittest
++
++from autosklearn.pipeline.components.regression.RegDeepNetIterative import \
++    RegDeepNetIterative
++from autosklearn.pipeline.util import _test_regressor, \
++    _test_regressor_iterative_fit
++
++import sklearn.metrics
++
++
++class RegDeepNetIterativeComponentTest(unittest.TestCase):
++    def test_default_configuration(self):
++        for i in range(2):
++            predictions, targets, _ = _test_regressor(RegDeepNetIterative)
++            self.assertAlmostEqual(0.41222280019741031,
++                                   sklearn.metrics.r2_score(y_true=targets,
++                                                            y_pred=predictions),
++                                   places=2)
++
++        for i in range(2):
++            predictions, targets, _ = _test_regressor_iterative_fit(RegDeepNetIterative)
++            self.assertAlmostEqual(0.41222280019741031,
++                                   sklearn.metrics.r2_score(y_true=targets,
++                                                            y_pred=predictions),
++                                   places=2)
+diff --git a/test/test_pipeline/test_base.py b/test/test_pipeline/test_base.py
+index ed06563a..62a7595f 100644
+--- a/test/test_pipeline/test_base.py
++++ b/test/test_pipeline/test_base.py
+@@ -31,14 +31,12 @@ class BaseTest(unittest.TestCase):
+         cs = base._get_base_search_space(cs, dataset_properties,
+                                          exclude, include, pipeline)
+ 
+-        self.assertEqual(len(cs.get_hyperparameter("p0:__choice__").choices),
+-                         13)
+-        self.assertEqual(len(cs.get_hyperparameter("p1:__choice__").choices),
+-                         15)
++        self.assertEqual(len(cs.get_hyperparameter("p0:__choice__").choices), 14)
++        self.assertEqual(len(cs.get_hyperparameter("p1:__choice__").choices), 16)
+ 
+-        # for clause in sorted([str(clause) for clause in cs.forbidden_clauses]):
+-        #     print(clause)
+-        self.assertEqual(134, len(cs.forbidden_clauses))
++        #for clause in sorted([str(clause) for clause in cs.forbidden_clauses]):
++        #    print clause
++        self.assertEqual(154, len(cs.forbidden_clauses))
+ 
+         cs = ConfigSpace.configuration_space.ConfigurationSpace()
+         dataset_properties = {'target_type': 'classification', 'signed': True}
+@@ -46,16 +44,14 @@ class BaseTest(unittest.TestCase):
+         cs = base._get_base_search_space(cs, dataset_properties,
+                                          exclude, include, pipeline)
+         self.assertEqual(len(cs.get_hyperparameter("p0:__choice__").choices),
+-                         13)
++                         14)
+         self.assertEqual(len(cs.get_hyperparameter("p1:__choice__").choices),
+-                         10)
++                         11)
+         self.assertEqual(len(cs.get_hyperparameter("c:__choice__").choices),
+                          1)
+         # Mostly combinations of p0 making the data unsigned and p1 not
+         # changing the values of the data points
+-        #for clause in sorted([str(clause) for clause in cs.forbidden_clauses]):
+-        #    print(clause)
+-        self.assertEqual(65, len(cs.forbidden_clauses))
++        self.assertEqual(72, len(cs.forbidden_clauses))
+ 
+ 
+         cs = ConfigSpace.configuration_space.ConfigurationSpace()
+@@ -64,26 +60,23 @@ class BaseTest(unittest.TestCase):
+         cs = base._get_base_search_space(cs, dataset_properties,
+                                          exclude, include, pipeline)
+         self.assertEqual(len(cs.get_hyperparameter("p0:__choice__").choices),
+-                         13)
++                         14)
+         self.assertEqual(len(cs.get_hyperparameter("p1:__choice__").choices),
+-                         15)
+-        self.assertEqual(len(cs.get_hyperparameter("c:__choice__").choices),
+                          16)
+-        #for clause in sorted([str(clause) for clause in cs.forbidden_clauses]):
+-        #    print(clause)
+-        self.assertEqual(107, len(cs.forbidden_clauses))
++        self.assertEqual(len(cs.get_hyperparameter("c:__choice__").choices),
++                         18)
++        self.assertEqual(114, len(cs.forbidden_clauses))
++
+ 
+         cs = ConfigSpace.configuration_space.ConfigurationSpace()
+         dataset_properties = {'target_type': 'classification', 'sparse': True}
+         cs = base._get_base_search_space(cs, dataset_properties,
+                                          exclude, include, pipeline)
+         self.assertEqual(len(cs.get_hyperparameter("p0:__choice__").choices),
+-                         11)
++                         12)
+         self.assertEqual(len(cs.get_hyperparameter("p1:__choice__").choices),
+-                         15)
+-        #for clause in sorted([str(clause) for clause in cs.forbidden_clauses]):
+-        #    print(clause)
+-        self.assertEqual(343, len(cs.forbidden_clauses))
++                         16)
++        self.assertEqual(361, len(cs.forbidden_clauses))
+ 
+         cs = ConfigSpace.configuration_space.ConfigurationSpace()
+         dataset_properties = {'target_type': 'classification',
+@@ -92,13 +85,11 @@ class BaseTest(unittest.TestCase):
+                                          exclude, include, pipeline)
+ 
+         self.assertEqual(len(cs.get_hyperparameter("p0:__choice__").choices),
+-                         11)
++                         12)
+         self.assertEqual(len(cs.get_hyperparameter("p1:__choice__").choices),
+-                         15)
++                         16)
+         # Data is guaranteed to be positive in cases like densifier,
+         # extra_trees_preproc, multinomial_nb -> less constraints
+-        #for clause in sorted([str(clause) for clause in cs.forbidden_clauses]):
+-        #    print(clause)
+-        self.assertEqual(298, len(cs.forbidden_clauses))
++        self.assertEqual(303, len(cs.forbidden_clauses))
+ 
+ 
+diff --git a/test/test_pipeline/test_classification.py b/test/test_pipeline/test_classification.py
+index 91b8606a..b9864efa 100644
+--- a/test/test_pipeline/test_classification.py
++++ b/test/test_pipeline/test_classification.py
+@@ -332,6 +332,9 @@ class SimpleClassificationPipelineTest(unittest.TestCase):
+                 elif 'The condensed distance matrix must contain only finite ' \
+                      'values.' in e.args[0]:
+                     continue
++                elif 'which is larger than the original space with n_features='\
++                    in e.args[0]:
++                    continue
+                 else:
+                     print(config)
+                     print(traceback.format_exc())
+@@ -372,12 +375,12 @@ class SimpleClassificationPipelineTest(unittest.TestCase):
+         self.assertEqual(len(cs.get_hyperparameter(
+             'rescaling:__choice__').choices), 6)
+         self.assertEqual(len(cs.get_hyperparameter(
+-            'classifier:__choice__').choices), 16)
++            'classifier:__choice__').choices), 18)
+         self.assertEqual(len(cs.get_hyperparameter(
+-            'preprocessor:__choice__').choices), 13)
++            'preprocessor:__choice__').choices), 14)
+ 
+         hyperparameters = cs.get_hyperparameters()
+-        self.assertEqual(172, len(hyperparameters))
++        self.assertEqual(261, len(hyperparameters))
+ 
+         #for hp in sorted([str(h) for h in hyperparameters]):
+         #    print hp
+diff --git a/test/test_pipeline/test_regression.py b/test/test_pipeline/test_regression.py
+index 70249c54..dd332b4b 100644
+--- a/test/test_pipeline/test_regression.py
++++ b/test/test_pipeline/test_regression.py
+@@ -153,6 +153,9 @@ class SimpleRegressionPipelineTest(unittest.TestCase):
+                 elif 'The condensed distance matrix must contain only finite ' \
+                      'values.' in e.args[0]:
+                     continue
++                elif 'which is larger than the original space with n_features=' \
++                        in e.args[0]:
++                    continue
+                 else:
+                     print(config)
+                     print(traceback.format_exc())
+@@ -218,7 +221,7 @@ class SimpleRegressionPipelineTest(unittest.TestCase):
+         self.assertIsInstance(cs, ConfigurationSpace)
+         conditions = cs.get_conditions()
+         hyperparameters = cs.get_hyperparameters()
+-        self.assertEqual(158, len(hyperparameters))
++        self.assertEqual(266, len(hyperparameters))
+         self.assertEqual(len(hyperparameters) - 5, len(conditions))
+ 
+     def test_get_hyperparameter_search_space_include_exclude_models(self):
+-- 
+2.17.1
+
