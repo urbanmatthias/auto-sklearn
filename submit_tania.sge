@@ -10,4 +10,5 @@
 #$ -m n
 
 source activate autonet
+ulimit -m 32000000
 python3 tania_test.py
