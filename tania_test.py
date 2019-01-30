@@ -19,6 +19,7 @@ import shutil
 import sklearn.model_selection
 import sklearn.datasets
 import sklearn.metrics
+import os
 
 from autosklearn.metrics import accuracy
 from autosklearn.classification import AutoSklearnClassifier
@@ -59,7 +60,8 @@ def get_spawn_classifier(X_train, y_train):
         function, which is called several times in the main block is a new
         process which runs one instance of auto-sklearn.
         """
-
+        os.environ['THEANO_FLAGS'] = '.theano_%s' % seed
+        import theano
         # Use the initial configurations from meta-learning only in one out of
         # the four processes spawned. This prevents auto-sklearn from evaluating
         # the same configurations in four processes.
