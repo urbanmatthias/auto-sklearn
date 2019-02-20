@@ -26,8 +26,8 @@ def main():
         sklearn.model_selection.train_test_split(X, y, random_state=1)
 
     automl = autosklearn.classification.AutoSklearnClassifier(
-        time_left_for_this_task=120,
-        per_run_time_limit=30,
+        time_left_for_this_task=480,
+        per_run_time_limit=60,
         tmp_folder='/tmp/autosklearn_cv_example_tmp',
         output_folder='/tmp/autosklearn_cv_example_out',
         delete_tmp_folder_after_terminate=False,
@@ -38,7 +38,7 @@ def main():
 
     # fit() changes the data in place, but refit needs the original data. We
     # therefore copy the data. In practice, one should reload the data
-    automl.fit(X_train.copy(), y_train.copy(), dataset_name='breast_cancer')
+    automl.fit(X_train.copy(), y_train.copy(), X_test=X_test, y_test=y_test, dataset_name='breast_cancer')
     # During fit(), models are fit on individual cross-validation folds. To use
     # all available data, we call refit() which trains all models in the
     # final ensemble on the whole dataset.
