@@ -1,14 +1,19 @@
-import os
+import pandas as pd
 import numpy as np
-from scipy.sparse import csr_matrix
+from abc import abstractmethod
+import os
+from  scipy.sparse import csr_matrix
+import math
 
-class AutoMlReader(object):
-    def __init__(self, path_to_info):
-        self.num_entries = None
-        self.num_features = None
-        self.num_classes = None
+from data_management.data_converter import DataConverter
 
-        self.file_name = path_to_info
+__author__ = "Max Dippel, Michael Burkart and Matthias Urban"
+__version__ = "0.0.1"
+__license__ = "BSD"
+
+class DataReader(object):
+    def __init__(self, file_name, is_classification=None):
+        self.file_name = file_name
         self.data = None
         self.X = None
         self.Y = None
@@ -16,14 +21,119 @@ class AutoMlReader(object):
         self.Y_valid = None
         self.X_test = None
         self.Y_test = None
-        self.is_classification = None
+        self.is_classification = is_classification
         self.categorical_features = None
         self.is_multilabel = None
         self.max_runtime = None
         self.metric = None
 
+    @abstractmethod
+    def read(self):
+        return
+
+    def convert(self, **kwargs):
+        """
+        Convert the data using standard data converter with standard settings.
+        
+        Arguments:
+            **kwargs: args and kwargs are passed to Dataconverter
+        """
+        data_converter = DataConverter(is_classification=self.is_classification, is_multilabel=self.is_multilabel, **kwargs)
+        self.X, self.Y, self.is_classification, self.is_multilabel, self.categorical_features = data_converter.convert(self.X, self.Y)
+
+        if self.X_valid is not None and self.Y_valid is not None:
+            self.X_valid, self.Y_valid, _, _, _ = data_converter.convert(self.X_valid, self.Y_valid)
+
+        if self.X_test is not None and self.Y_test is not None:
+            self.X_test, self.Y_test, _, _, _ = data_converter.convert(self.X_test, self.Y_test)
+
+
+class CSVReader(DataReader):
+    def __init__(self, file_name, is_classification=None):
+        self.num_entries = None
+        self.num_features = None
+        self.num_classes = None
+        super(CSVReader, self).__init__(file_name, is_classification)
+        
     
+
+    def read(self, auto_convert=True, **kwargs):
+        """
+        Read the data from given csv file.
+        
+        Arguments:
+            auto_convert: Automatically convert data after reading.
+            *args, **kwargs: arguments for converting.
+        """
+        self.data = pd.read_csv(self.file_name)
+
+
+        self.num_entries = len(self.data)
+        self.num_features = len(self.data.iloc[0]) - 1
+
+        self.data = np.array(self.data)
+            
+        self.X = self.data[0:self.num_entries, 0:self.num_features] #np.array(  .iloc
+        self.Y = self.data[0:self.num_entries, -1]
+
+        for i in range(self.X.shape[0]):
+            for j in range(self.X.shape[1]):
+                if self.X[i, j] == "?":
+                    self.X[i, j] = np.nan
+
+        self.num_classes = len(np.unique(self.Y))
+        if (auto_convert):
+            self.convert(**kwargs)
+            
+class OpenMlReader(DataReader):
+    def __init__(self, dataset_id, is_classification = None, api_key=None):
+        import openml
+        self.openml = openml
+        self.num_entries = None
+        self.num_features = None
+        self.num_classes = None
+        self.dataset_id = dataset_id
+        if api_key:
+            openml.config.server = "https://www.openml.org/api/v1/xml"
+            openml.config.apikey = api_key
+        super(OpenMlReader, self).__init__("openml:" + str(dataset_id), is_classification)
+
     def read(self, **kwargs):
+        """
+        Read the data from given openml dataset file.
+        
+        Arguments:
+            auto_convert: Automatically convert data after reading.
+            *args, **kwargs: arguments for converting.
+        """
+        
+        dataset = self.openml.datasets.get_dataset(self.dataset_id)
+        try:
+            self.X, self.Y, self.categorical_features = dataset.get_data(
+                target=dataset.default_target_attribute, return_categorical_indicator=True)
+        except Exception as e:
+            raise RuntimeError("An error occurred when loading the dataset and splitting it into X and Y. Please check if the dataset is suitable.")
+
+        self.num_entries = self.X.shape[0]
+        self.num_features = self.X.shape[1]
+        self.is_multilabel = False
+        class_labels = dataset.retrieve_class_labels(target_name=dataset.default_target_attribute)
+        if class_labels:
+            self.is_classification = True
+            self.num_classes = len(class_labels)
+        else:
+            self.is_classification = False
+            self.num_classes = 1
+
+
+class AutoMlReader(DataReader):
+    def __init__(self, path_to_info):
+        self.num_entries = None
+        self.num_features = None
+        self.num_classes = None
+        super(AutoMlReader, self).__init__(path_to_info, None)
+    
+    def read(self, auto_convert=True, **kwargs):
         path_to_info = self.file_name
         info_dict = dict()
 
@@ -82,6 +192,9 @@ class AutoMlReader(object):
             self.Y = np.argmax(self.Y, axis=1)
             self.Y_valid = np.argmax(self.Y_valid, axis=1) if self.Y_valid is not None else None
             self.Y_test = np.argmax(self.Y_test, axis=1) if self.Y_test is not None else None
+
+        if auto_convert and not is_sparse:
+            self.convert(force_categorical=force_categorical, force_numerical=force_numerical, **kwargs)
         
     def read_datafile(self, filepath, shape):
         data = []
