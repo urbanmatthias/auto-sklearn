@@ -9,7 +9,7 @@ cd $TMPDIR
 
 module load tools/singularity/2.6
 
-COMMAND="singularity exec --pwd /data/auto-sklearn autonet.simg python run_openml_benchmark.py ${MOAB_JOBARRAYINDEX}"
+COMMAND="singularity exec -B $TMPDIR:/tmp --pwd /data/auto-sklearn autonet.simg python run_openml_benchmark.py ${MOAB_JOBARRAYINDEX}"
 
 $COMMAND 1> $TMPDIR/stdout.txt 2> $TMPDIR/stderr.txt
 
