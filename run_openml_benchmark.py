@@ -40,7 +40,7 @@ if __name__ == '__main__':
     dataset_id = int(sys.argv[-1]) - 1
 
     print(tempfile.gettempdir())
-    os.environ['THEANO_FLAGS'] = os.path.join(tempfile.gettempdir(), "compile")
+    os.environ['THEANO_FLAGS'] = "base_compiledir=%s" % os.path.join(tempfile.gettempdir(), "compile")
     os.environ['OPENBLAS_NUM_THREADS'] = "1"
 
     with open("openml_datasets.txt", "r") as f:
