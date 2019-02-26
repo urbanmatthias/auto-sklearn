@@ -15,7 +15,7 @@ Singularity container for autonet
 
 %post
     apt-get update
-    apt-get -y install wget git gcc g++ tar
+    apt-get -y install wget git gcc g++ tar libpython3.6-dev
     cd /data
     wget https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh
     bash Miniconda3-latest-Linux-x86_64.sh -b -p /data/miniconda
