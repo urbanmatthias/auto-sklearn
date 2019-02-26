@@ -27,6 +27,7 @@ Singularity container for auto-sklearn
 
     git clone https://github.com/urbanmatthias/auto-sklearn.git
     cd auto-sklearn
+    git checkout openml
 
     pip install numpy==1.12.0
     pip install smac==0.8.0
