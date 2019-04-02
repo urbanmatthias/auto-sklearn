@@ -95,7 +95,8 @@ def main(input_directories, output_file, seed, ensemble_size, n_jobs=1):
 
     backend = create(None, None,
                      delete_tmp_folder_after_terminate=False,
-                     delete_output_folder_after_terminate=False)
+                     delete_output_folder_after_terminate=False,
+                     shared_mode=True)
     backend.context._temporary_directory = input_directory
     backend.context._output_directory = input_directory
     backend.internals_directory = os.path.join(input_directory, ".auto-sklearn")
@@ -182,7 +183,8 @@ def evaluate(input_directory, validation_files, test_files, ensemble_size=50):
 
     backend = create(None, None,
                      delete_tmp_folder_after_terminate=False,
-                     delete_output_folder_after_terminate=False)
+                     delete_output_folder_after_terminate=False,
+                     shared_mode=True)
     backend.context._temporary_directory = input_directory
     backend.context._output_directory = input_directory
     backend.internals_directory = os.path.join(input_directory, ".auto-sklearn")
