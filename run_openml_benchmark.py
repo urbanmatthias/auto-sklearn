@@ -33,7 +33,8 @@ def main(dataset_name, dataset_id):
     )
 
     _ , _, X_train, y_train, X_test, y_test = deterministic_shuffle_and_split(dm.X, dm.Y, 0.2, 0)
-    automl.fit(X_train, y_train, X_test=X_test, y_test=y_test, dataset_name=dataset_name, metric=balanced_accuracy)
+    feat_type = ["Categorical" if x else "Numerical" for x in dm.categorical_features] if dm.categorical_features else None
+    automl.fit(X_train, y_train, X_test=X_test, y_test=y_test, dataset_name=dataset_name, metric=balanced_accuracy, feat_type=feat_type)
 
 if __name__ == '__main__':
     dataset_id = int(sys.argv[-1]) - 1

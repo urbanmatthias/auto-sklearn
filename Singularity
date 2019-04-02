@@ -33,3 +33,4 @@ Singularity container for auto-sklearn
     pip install smac==0.8.0
     cat requirements.txt | xargs -n 1 -L 1 pip install
     pip install xmltodict requests liac-arff openml xgboost==0.80
+    pip install hpbandster
