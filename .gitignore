@@ -47,3 +47,6 @@ download
 num_run
 number_submission
 .theano*
+AUTONET*
+autonet_results/test_results*
+autonet_results/results*

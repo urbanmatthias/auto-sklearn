@@ -1,7 +1,7 @@
 #!/bin/bash
 #MOAB -t 1-73
 #MOAB -N AUTONET1
-#MOAB -l nodes=1:ppn=1,walltime=144000,pmem=9000MB
+#MOAB -l nodes=1:ppn=1,walltime=324000,pmem=9000MB
 #MOAB -E
 
 cp /work/ws/nemo/fr_mu37-autonet-0/autonet/autonet.simg $TMPDIR
@@ -15,4 +15,4 @@ $COMMAND 1> $TMPDIR/stdout.txt 2> $TMPDIR/stderr.txt
 
 echo "Job finished. Copy output."
 tar -czf results.tar.gz stdout.txt stderr.txt tmp output
-mv results.tar.gz /work/ws/nemo/fr_mu37-autonet-0/autonet/autonet_results/results_${MOAB_JOBARRAYINDEX}.tar.gz
+mv results.tar.gz /work/ws/nemo/fr_mu37-autonet-0/autonet/autonet_results1/results_${MOAB_JOBARRAYINDEX}.tar.gz
