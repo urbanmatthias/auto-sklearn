@@ -1,0 +1,23 @@
+#!/bin/bash
+#MOAB -t 1-73
+#MOAB -N AUTOSKLEARN
+#MOAB -l nodes=1:ppn=1,walltime=103200,pmem=9000MB
+#MOAB -E
+
+cp /work/ws/nemo/fr_mu37-autonet-0/auto-sklearn/autosklearn.simg $TMPDIR
+cp /work/ws/nemo/fr_mu37-autonet-0/auto-sklearn/results/results_${MOAB_JOBARRAYINDEX}.tar.gz $TMPDIR/results.tar.gz
+cp /work/ws/nemo/fr_mu37-autonet-0/auto-sklearn/combo_results/autopytorch_results_${MOAB_JOBARRAYINDEX}.tar.gz $TMPDIR/results2.tar.gz
+cd $TMPDIR
+
+tar -xzf results.tar.gz
+tar -xzf results2.tar.gz
+
+module load tools/singularity/2.6
+
+COMMAND="singularity exec -B $TMPDIR:/tmp --pwd /data/auto-sklearn autosklearn.simg python combine_performance.py --input-directory /tmp/tmp --input-directory-autopytorch  /tmp/auto_pytorch_results --seed 0 --output-file /tmp/test_results.csv"
+
+$COMMAND 1> $TMPDIR/stdout.txt 2> $TMPDIR/stderr.txt
+
+echo "Job finished. Copy output."
+tar -czf results.tar.gz stdout.txt stderr.txt test_results.csv
+mv results.tar.gz /work/ws/nemo/fr_mu37-autonet-0/auto-sklearn/combo_results/test_results_${MOAB_JOBARRAYINDEX}.tar.gz
