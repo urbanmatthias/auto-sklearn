@@ -223,7 +223,7 @@ def main(input_directories, input_directory_autopytorch, output_file, seed, ense
         for i, o in enumerate(output):
             csv_writer.writerow({'Time': (o['ensemble_time'] +
                                          o['time_function_evaluation'] -
-                                         starttime) / 2,
+                                         starttime) * 2,
                                  'Training (Empirical) Performance':
                                      o['ensemble_error'],
                                  'Test Set Performance': o['ensemble_test_error'],
