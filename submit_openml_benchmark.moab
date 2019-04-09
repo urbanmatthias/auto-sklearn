@@ -15,4 +15,4 @@ $COMMAND 1> $TMPDIR/stdout.txt 2> $TMPDIR/stderr.txt
 
 echo "Job finished. Copy output."
 tar -czf results.tar.gz stdout.txt stderr.txt tmp output
-mv results.tar.gz /work/ws/nemo/fr_mu37-autonet-0/autonet/autonet_results1/results_${MOAB_JOBARRAYINDEX}.tar.gz
+mv results.tar.gz /work/ws/nemo/fr_mu37-autonet-0/autonet/autonet_results/results_${MOAB_JOBARRAYINDEX}.tar.gz
