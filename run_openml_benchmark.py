@@ -15,7 +15,7 @@ import autosklearn.classification
 
 def main(dataset_name, dataset_id):
     dm = DataManager()
-    dm.read_data(dataset_name)
+    dm.read_data(dataset_name, test_split=0.2)
 
     automl = autosklearn.classification.AutoSklearnClassifier(
         time_left_for_this_task=92400, # sec., how long should this seed fit process run
@@ -33,9 +33,8 @@ def main(dataset_name, dataset_id):
         include_estimators=['DeepFeedNet']
     )
 
-    _ , _, X_train, y_train, X_test, y_test = deterministic_shuffle_and_split(dm.X, dm.Y, 0.2, 0)
     feat_type = ["Categorical" if x else "Numerical" for x in dm.categorical_features] if dm.categorical_features else None
-    automl.fit(X_train, y_train, X_test=X_test, y_test=y_test, dataset_name=dataset_name, metric=balanced_accuracy, feat_type=feat_type)
+    automl.fit(dm.X_train, dm.Y_train, X_test=dm.X_test, y_test=dm.Y_test, dataset_name=dataset_name, metric=balanced_accuracy, feat_type=feat_type)
 
 if __name__ == '__main__':
     dataset_id = int(sys.argv[-1]) - 1
