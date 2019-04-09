@@ -80,7 +80,7 @@
 		"time_column": 0,
 		"metric_columns": {
 			"1": {
-				"name": "ensemble_val_balanced_accuracy",
+				"name": "ensemble_balanced_accuracy",
 				"transform": "(1-x)*100"
 			},
 			"2": {
