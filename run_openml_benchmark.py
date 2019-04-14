@@ -29,7 +29,7 @@ def main(dataset_name, dataset_id):
         initial_configurations_via_metalearning=0,
         seed=0,
         resampling_strategy='cv',
-        resampling_strategy_arguments={'folds': 5},
+        resampling_strategy_arguments={'folds': 5, 'shuffle': False},
         include_estimators=['DeepFeedNet']
     )
 
@@ -42,6 +42,7 @@ if __name__ == '__main__':
     print(tempfile.gettempdir())
     os.environ['THEANO_FLAGS'] = "base_compiledir=%s" % os.path.join(tempfile.gettempdir(), "compile")
     os.environ['OPENBLAS_NUM_THREADS'] = "1"
+    os.environ['OMP_NUM_THREADS'] = "1"
 
     with open("openml_datasets.txt", "r") as f:
         dataset_name = list(f)[dataset_id].strip()
