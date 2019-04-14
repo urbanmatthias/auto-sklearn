@@ -29,7 +29,7 @@ def main(dataset_name, dataset_id):
         initial_configurations_via_metalearning=0,
         seed=0,
         resampling_strategy='cv',
-        resampling_strategy_arguments={'folds': 5}
+        resampling_strategy_arguments={'folds': 5, 'shuffle': False}
     )
 
     feat_type = ["Categorical" if x else "Numerical" for x in dm.categorical_features] if dm.categorical_features else None
