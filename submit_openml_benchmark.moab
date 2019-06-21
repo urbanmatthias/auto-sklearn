@@ -7,6 +7,9 @@
 cp /work/ws/nemo/fr_mu37-autonet-0/autonet/autonet.simg $TMPDIR
 cd $TMPDIR
 
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+
 module load tools/singularity/2.6
 
 COMMAND="singularity exec -B $TMPDIR:/tmp --pwd /data/auto-sklearn autonet.simg python run_openml_benchmark.py ${MOAB_JOBARRAYINDEX}"
